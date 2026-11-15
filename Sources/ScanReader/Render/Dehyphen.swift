@@ -10,6 +10,14 @@ enum Dehyphen {
     /// Частицы, которые всегда пишутся через дефис.
     private static let particles: Set<String> = ["то", "либо", "нибудь", "таки", "ка", "де", "с"]
 
+    /// Первые части составных слов, которые пишутся через дефис (веб-приложение, бизнес-план, экс-чемпион).
+    /// Проверяются до словаря: словари разных машин по-разному относятся к слитному написанию.
+    private static let hyphenPrefixes: Set<String> = [
+        "веб", "интернет", "бизнес", "онлайн", "офлайн", "оффлайн", "экс", "вице", "лейб", "штаб", "медиа",
+        "арт", "поп", "рок", "фан", "топ", "хай", "смарт", "фитнес", "контр", "блок", "пресс", "кибер",
+        "web", "self",          // англ. re-/pre-/co-/ex- — слишком часто обычный перенос (re-member, ex-ample)
+    ]
+
     /// Строка заканчивается переносом, а следующая начинается со строчной — кандидат на склейку.
     static func isCandidate(_ left: String, _ right: String) -> Bool {
         guard left.count > 1, let h = left.last, marks.contains(h), let r = right.first else { return false }
@@ -27,6 +35,7 @@ enum Dehyphen {
 
         if left.last == "\u{00AD}" { return (stem + right, false) }               // мягкий перенос — всегда перенос
         if particles.contains(coreLower) { return (stem + "-" + right, true) }       // что-то, кто-нибудь
+        if hyphenPrefixes.contains(stem.lowercased()) { return (stem + "-" + right, true) }
         // словаря этого языка в системе нет — эвристика: короткая первая часть (веб-, IT-, арт-) — дефис
         guard hasDictionary(lang) else { return stem.count <= 4 ? (stem + "-" + right, true) : (stem + right, false) }
         if correct(joined, lang) { return (stem + right, false) }
