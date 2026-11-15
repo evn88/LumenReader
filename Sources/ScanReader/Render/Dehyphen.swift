@@ -27,11 +27,18 @@ enum Dehyphen {
 
         if left.last == "\u{00AD}" { return (stem + right, false) }               // мягкий перенос — всегда перенос
         if particles.contains(coreLower) { return (stem + "-" + right, true) }       // что-то, кто-нибудь
+        // словаря этого языка в системе нет — эвристика: короткая первая часть (веб-, IT-, арт-) — дефис
+        guard hasDictionary(lang) else { return stem.count <= 4 ? (stem + "-" + right, true) : (stem + right, false) }
         if correct(joined, lang) { return (stem + right, false) }
         if correct(hyphenated, lang) { return (stem + "-" + right, true) }
         // оба куска — самостоятельные слова (веб + приложений): составное слово через дефис
         if correct(stem, lang), correct(core, lang), stem.count <= 6 { return (stem + "-" + right, true) }
         return (stem + right, false)
+    }
+
+    static func hasDictionary(_ lang: String) -> Bool {
+        let check = { NSSpellChecker.shared.availableLanguages.contains { $0.hasPrefix(lang) } }
+        return Thread.isMainThread ? check() : DispatchQueue.main.sync(execute: check)
     }
 
     private static var memo: [String: Bool] = [:]
