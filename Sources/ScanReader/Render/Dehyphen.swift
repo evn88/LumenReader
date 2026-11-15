@@ -36,9 +36,24 @@ enum Dehyphen {
         return (stem + right, false)
     }
 
+    private static var dictionaryWorks: [String: Bool] = [:]
+
+    /// Словарь языка есть и действительно работает: заведомая бессмыслица должна считаться ошибкой
+    /// (на серверах без сессии пользователя проверка орфографии «пропускает» всё подряд).
     static func hasDictionary(_ lang: String) -> Bool {
-        let check = { NSSpellChecker.shared.availableLanguages.contains { $0.hasPrefix(lang) } }
-        return Thread.isMainThread ? check() : DispatchQueue.main.sync(execute: check)
+        lock.lock()
+        if let v = dictionaryWorks[lang] { lock.unlock(); return v }
+        lock.unlock()
+        let check = { () -> Bool in
+            let c = NSSpellChecker.shared
+            guard c.availableLanguages.contains(where: { $0.hasPrefix(lang) }) else { return false }
+            let nonsense = lang == "ru" ? "ывапролджэ" : "qzxvbnmlkj"
+            return c.checkSpelling(of: nonsense, startingAt: 0, language: lang, wrap: false,
+                                   inSpellDocumentWithTag: 0, wordCount: nil).location != NSNotFound
+        }
+        let v = Thread.isMainThread ? check() : DispatchQueue.main.sync(execute: check)
+        lock.lock(); dictionaryWorks[lang] = v; lock.unlock()
+        return v
     }
 
     private static var memo: [String: Bool] = [:]
