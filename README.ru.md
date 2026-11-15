@@ -4,7 +4,7 @@
 Страницы распознаются встроенными моделями Vision, и текст заново набирается на тех же местах
 (те же строки, шрифты подобраны под скан): скан читается как электронная книга, а оригинал — в один клик.
 
-[English version](README.md)
+Сайт: [ai-soft.app](https://ai-soft.app) · [English version](README.md)
 
 ![Библиотека](docs/screenshots/library.png)
 

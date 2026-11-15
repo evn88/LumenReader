@@ -4,7 +4,7 @@
 Scanned pages are recognized with the on-device Vision models, and the text is re-typeset in place
 (same lines, fonts matched to the scan), so a scan reads like an e-book — while the original is one click away.
 
-[Русская версия](README.ru.md)
+Website: [ai-soft.app](https://ai-soft.app) · [Русская версия](README.ru.md)
 
 ![Library](docs/screenshots/library.png)
 
