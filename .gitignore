@@ -1,0 +1,23 @@
+# SwiftPM / Xcode
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# собранное приложение
+*.app
+*.dSYM
+
+# кеш распознавания, обложки, заметки рядом с книгами
+.scanreader/
+
+# macOS
+.DS_Store
+
+# demo/: в репозитории только исходники демо (синтетические страницы и библиотека из scripts/);
+# всё, что получается при прогонах (рендеры, логи, скриншоты), — локально
+demo/*
+!demo/synthetic-page.png
+!demo/code-page.png
+!demo/library/

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="ru" xml:lang="ru"><head><title>Глава 2. Код в книгах</title></head><body><section epub:type="chapter"><h1 id="c2">Глава 2. Код в книгах</h1><p>Чтение — это разговор с автором, растянутый во времени. Хорошая книга задаёт вопросы раньше, чем мы успеваем их сформулировать, а хорошая читалка не мешает этому разговору: не отвлекает, не торопит и помнит, где мы остановились. Электронный текст позволяет менять размер шрифта, тему и поля, сохраняя структуру книги — главы, сноски, иллюстрации и примеры кода.</p><pre><code class="language-swift">import Foundation
+
+struct Note: Codable {
+    let page: Int
+    let text: String
+}
+
+func load(from url: URL) throws -&gt; [Note] {
+    let data = try Data(contentsOf: url)
+    return try JSONDecoder().decode([Note].self, from: data)
+}</code></pre><p>Чтение — это разговор с автором, растянутый во времени. Хорошая книга задаёт вопросы раньше, чем мы успеваем их сформулировать, а хорошая читалка не мешает этому разговору: не отвлекает, не торопит и помнит, где мы остановились. Электронный текст позволяет менять размер шрифта, тему и поля, сохраняя структуру книги — главы, сноски, иллюстрации и примеры кода.</p></section></body></html>
