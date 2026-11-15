@@ -468,6 +468,7 @@ struct SettingsView: View {
             }
             Text("Лучше общая папка iCloud Drive: книги, распознанный текст, обложки и прогресс будут на всех устройствах.")
                 .font(.caption).foregroundStyle(.secondary)
+            if ApplicationUpdater.shared.isConfigured { UpdatesSection() }
             if let url = SupportConfiguration.pageURL { DevelopmentSupportSection(pageURL: url) }
         }
         .formStyle(.grouped)

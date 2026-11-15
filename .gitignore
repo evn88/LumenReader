@@ -21,3 +21,7 @@ demo/*
 !demo/synthetic-page.png
 !demo/code-page.png
 !demo/library/
+
+# релизная сборка
+build/
+*.dmg

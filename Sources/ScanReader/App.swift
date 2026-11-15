@@ -48,6 +48,7 @@ struct ScanReaderApp: App {
         // каждая книга — в своём окне, без системных вкладок (как в Apple Books)
         NSWindow.allowsAutomaticWindowTabbing = false
         Product.migrate()
+        DispatchQueue.main.async { ApplicationUpdater.shared.start() }
         // миграция: масштаб, заданный до появления автоподбора, считаем ручным
         let d = UserDefaults.standard
         if d.object(forKey: "textScaleAuto") == nil, let old = d.object(forKey: "textScale") as? Double {
@@ -265,6 +266,9 @@ struct AppCommands: Commands {
     var body: some Commands {
         CommandGroup(replacing: .appInfo) {
             Button("О программе \(Product.name)") { openWindow(id: "about") }
+            if ApplicationUpdater.shared.isConfigured {
+                Button("Проверить обновления…") { ApplicationUpdater.shared.checkForUpdates() }
+            }
             if SupportConfiguration.pageURL != nil {
                 Button("Поддержать проект…") { _ = SupportConfiguration.open() }
             }

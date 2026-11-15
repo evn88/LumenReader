@@ -54,6 +54,17 @@ swiftc -O scripts/make-demo-scan.swift -o /tmp/mds && /tmp/mds demo/synthetic-pa
 swiftc -O scripts/make-demo-cover.swift -o /tmp/cover && python3 scripts/make-demo-library.py /tmp/cover
 ```
 
+
+## Обновления и релизы
+
+Приложение обновляется через [Sparkle 2](https://sparkle-project.org) (меню «Проверить обновления…», автопроверка в настройках).
+Подписанная лента лежит в GitHub Releases; адрес ленты и публичный EdDSA-ключ — в `product.env`.
+
+`scripts/release.sh 0.2` собирает, подписывает, упаковывает DMG и генерирует подписанный `appcast.xml` в `build/`,
+затем печатает команду `gh release create` — сам ничего не публикует. Приватный ключ Sparkle хранится в Keychain
+(аккаунт = bundle id) или в секрете `LUMENREADER_SPARKLE_PRIVATE_KEY` для ручного
+[workflow релиза](.github/workflows/release.yml).
+
 ## Ограничения
 
 - Прототип; качество зависит от скана. Сложная многоколоночная вёрстка и формулы заново не набираются.

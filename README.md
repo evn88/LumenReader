@@ -53,6 +53,17 @@ swiftc -O scripts/make-demo-scan.swift -o /tmp/mds && /tmp/mds demo/synthetic-pa
 swiftc -O scripts/make-demo-cover.swift -o /tmp/cover && python3 scripts/make-demo-library.py /tmp/cover
 ```
 
+
+## Updates & releases
+
+The app updates itself with [Sparkle 2](https://sparkle-project.org) (menu **Check for Updates…**, automatic checks in Settings).
+The signed feed lives in GitHub Releases; the feed URL and the public EdDSA key are set in `product.env`.
+
+`scripts/release.sh 0.2` builds, signs, packages a DMG and generates a signed `appcast.xml` in `build/`,
+then prints the `gh release create` command — it never publishes by itself. The private Sparkle key stays in the
+Keychain (account = bundle id) or in the `LUMENREADER_SPARKLE_PRIVATE_KEY` secret for the manual
+[Release workflow](.github/workflows/release.yml).
+
 ## Limitations
 
 - Prototype quality; recognition quality depends on the scan. Complex multi-column layouts and math are not re-typeset.

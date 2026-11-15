@@ -14,6 +14,15 @@ enum SupportConfiguration {
         return c.url
     }
 
+    /// Сайт приложения (SiteURL в product.env); пусто — ссылка скрыта.
+    static var siteURL: URL? { siteURL(infoDictionary: Bundle.main.infoDictionary) }
+
+    static func siteURL(infoDictionary: [String: Any]?) -> URL? {
+        var info = infoDictionary ?? [:]
+        info["SupportURL"] = info["SiteURL"]
+        return pageURL(infoDictionary: info)
+    }
+
     @MainActor static func open() -> Bool {
         guard let url = pageURL else { return false }
         return NSWorkspace.shared.open(url)
@@ -55,6 +64,9 @@ struct AboutView: View {
             Text(Product.name).font(.title).fontWeight(.semibold)
             if !version.isEmpty { Text("Версия \(version)").font(.callout).foregroundStyle(.secondary) }
             Divider()
+            if let site = SupportConfiguration.siteURL {
+                Link(site.host ?? site.absoluteString, destination: site)
+            }
             Link("github.com/evn88", destination: URL(string: "https://github.com/evn88")!)
             if let url = SupportConfiguration.pageURL {
                 Link(destination: url) { Label("GitHub Sponsors", systemImage: "heart") }

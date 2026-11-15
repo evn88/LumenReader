@@ -7,7 +7,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 source ./product.env
 
-APP="$HOME/Applications/$PRODUCT_NAME.app"
+# APP_DIR — куда собрать (по умолчанию ~/Applications; scripts/release.sh собирает в build/)
+APP="${APP_DIR:-$HOME/Applications}/$PRODUCT_NAME.app"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -24,11 +25,16 @@ for s in 16 32 128 256 512; do
 done
 iconutil -c icns "$ICONSET" -o "$WORK/AppIcon.icns"
 
-mkdir -p "$HOME/Applications"
+mkdir -p "$(dirname "$APP")"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/ScanReader "$APP/Contents/MacOS/$PRODUCT_NAME"
 cp "$WORK/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+# Sparkle (автообновление) — во Frameworks, как в PangoZip
+mkdir -p "$APP/Contents/Frameworks"
+ditto .build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework \
+  "$APP/Contents/Frameworks/Sparkle.framework"
+cp .build/artifacts/sparkle/Sparkle/LICENSE "$APP/Contents/Resources/Sparkle-LICENSE.txt"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -41,13 +47,22 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
-  <key>CFBundleVersion</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>${BUILD_NUMBER:-$VERSION}</string>
   <key>CFBundleDevelopmentRegion</key><string>ru</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.books</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>SupportURL</key><string>${SUPPORT_URL:-}</string>
+  <key>SiteURL</key><string>${SITE_URL:-}</string>
+  <key>SUFeedURL</key><string>${UPDATE_FEED_URL:-}</string>
+  <key>SUPublicEDKey</key><string>${SPARKLE_PUBLIC_KEY:-}</string>
+  <key>SUEnableAutomaticChecks</key><true/>
+  <key>SUAutomaticallyUpdate</key><false/>
+  <key>SUAllowsAutomaticUpdates</key><false/>
+  <key>SUEnableSystemProfiling</key><false/>
+  <key>SUVerifyUpdateBeforeExtraction</key><true/>
+  <key>SURequireSignedFeed</key><true/>
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>
@@ -61,12 +76,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | grep -m1 'Apple Development' | sed -E 's/.*"(.+)"/\1/' || true)"
-if [[ -n "$IDENTITY" ]]; then
-  codesign --force --deep --options runtime --timestamp=none -i "$BUNDLE_ID" -s "$IDENTITY" "$APP"
-  echo "Подпись: $IDENTITY"
-else
-  codesign --force --deep -i "$BUNDLE_ID" -s - "$APP"
-  echo "Подпись: ad-hoc"
-fi
+SIGN="${IDENTITY:--}"
+RUNTIME=(); [[ "$SIGN" != "-" ]] && RUNTIME=(--options runtime --timestamp=none)
+# Sparkle — своими идентификаторами (без -i), затем само приложение
+codesign --force --deep "${RUNTIME[@]}" -s "$SIGN" "$APP/Contents/Frameworks/Sparkle.framework"
+codesign --force "${RUNTIME[@]}" -i "$BUNDLE_ID" -s "$SIGN" "$APP"
+echo "Подпись: ${IDENTITY:-ad-hoc}"
 codesign --verify --strict --verbose=2 "$APP"
 echo "Готово: $APP"

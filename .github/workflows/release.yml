@@ -1,0 +1,40 @@
+# Релиз вручную (Actions → Release → Run workflow): сборка, DMG, подписанная лента Sparkle, GitHub Release.
+# Нужен секрет LUMENREADER_SPARKLE_PRIVATE_KEY — экспорт `generate_keys --account io.github.evn88.lumenreader -x key.txt`.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Версия (например, 0.2)"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: lumenreader-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'evn88/LumenReader'
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build, sign (ad hoc), package and sign the update feed
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.LUMENREADER_SPARKLE_PRIVATE_KEY }}
+        run: |
+          test -n "$SPARKLE_PRIVATE_KEY" || { echo "Нет секрета LUMENREADER_SPARKLE_PRIVATE_KEY"; exit 1; }
+          scripts/release.sh "${{ inputs.version }}"
+      - name: Publish GitHub Release (latest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${{ inputs.version }}"
+          gh release create "v$v" --repo "$GITHUB_REPOSITORY" --title "Lumen Reader $v" --generate-notes \
+            build/LumenReader-$v.dmg build/LumenReader-$v.dmg.sha256 build/appcast.xml
