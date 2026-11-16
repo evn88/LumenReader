@@ -135,6 +135,7 @@ final class EPUBTranslator: ObservableObject, BookTranslating {
     func languagesInstalled() {
         pendingDownload = nil
         problem = nil
+        done = Set(store.keys().compactMap(Self.chapter))
         bookPause = nil
         refreshCurrent()
         if wholeBook, job == nil { startBook() }

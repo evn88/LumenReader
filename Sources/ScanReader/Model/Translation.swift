@@ -72,7 +72,7 @@ enum TranslationProblem: LocalizedError, Equatable {
             return "Нужно скачать языки для перевода: \(LanguageGuess.title(s)) → \(LanguageGuess.title(t))"
         case .unsupported(let s, let t):
             return "Системный переводчик не знает пару \(LanguageGuess.title(s)) → \(LanguageGuess.title(t)). "
-                + "Скачайте модель TranslateGemma в настройках перевода."
+                + "Скачайте модель TranslateGemma в панели «Перевод»."
         case .failed(let m):
             return "Не удалось перевести: \(m)"
         }
@@ -179,9 +179,20 @@ enum PageText {
         var l = Reflow.prepare(layout, carryIn: false, carryOut: nil)
         // OCR рвёт абзац посреди предложения (строка другой ширины, выделенное слово) — переводчику нужно
         // предложение целиком: склеиваем, если предыдущий кусок не закончен, а шрифт и кегль те же
-        var merged: [Paragraph] = []
+        // пункты списка («•», «–», «1.») — отдельные единицы: OCR часто сливает их в один абзац
+        var split: [Paragraph] = []
         for p in l.paragraphs {
-            if var prev = merged.last, let a = prev.lines.last, let b = p.lines.first,
+            var cur = p
+            cur.lines = []
+            for line in p.lines {
+                if !cur.lines.isEmpty, isListItem(line) { split.append(cur); cur.lines = [] }
+                cur.lines.append(line)
+            }
+            split.append(cur)
+        }
+        var merged: [Paragraph] = []
+        for p in split {
+            if var prev = merged.last, !(p.lines.first.map(isListItem) ?? false), let a = prev.lines.last, let b = p.lines.first,
                prev.family == p.family, abs(prev.fontSize - p.fontSize) < max(prev.fontSize, 1) * 0.12,
                b.bounds.minY > a.bounds.minY, b.bounds.minY - a.bounds.maxY < a.bounds.height * 1.2,
                let last = a.words.last?.text.last, !".!?:;…»\")]".contains(last), a.words.count > 0 {
@@ -193,6 +204,12 @@ enum PageText {
         }
         l.paragraphs = merged
         return l
+    }
+
+    static func isListItem(_ line: TextLine) -> Bool {
+        guard let w = line.words.first?.text else { return false }
+        if ["•", "·", "▪", "◦", "–", "—", "-", "*"].contains(w) || w.hasPrefix("•") { return true }
+        return w.count <= 3 && w.last.map { $0 == "." || $0 == ")" } == true && w.dropLast().allSatisfy(\.isNumber) && w.count > 1
     }
 
     /// Текст абзаца: строки через пробел, переносы склеены.

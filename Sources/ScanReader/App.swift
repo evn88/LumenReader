@@ -59,6 +59,10 @@ struct ScanReaderApp: App {
         // не выбрал в Системных настройках «всегда»: registration domain уступает явной глобальной настройке.
         UserDefaults.standard.register(defaults: ["AppleShowScrollBars": "WhenScrolling"])
         DispatchQueue.main.async { ApplicationUpdater.shared.start() }
+        // модель перевода (llama.cpp/Metal) выгружается до деструкторов — иначе падение при выходе
+        NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: nil) { _ in
+            LlamaRunner.shared.shutdown()
+        }
         // миграция: масштаб, заданный до появления автоподбора, считаем ручным
         let d = UserDefaults.standard
         if d.object(forKey: "textScaleAuto") == nil, let old = d.object(forKey: "textScale") as? Double {
@@ -275,6 +279,7 @@ enum TranslateCLI {
         case .failure(let e): print("Ошибка: \(e.localizedDescription)"); return 2
         case .success(let t): tr = t
         }
+        defer { LlamaRunner.shared.shutdown() }
         print(String(format: "Перевод за %.1f с, абзацев %d", Date().timeIntervalSince(t0), units.count))
         for (u, t) in zip(units, tr) { print("— \(u)\n→ \(t ?? "(без перевода)")\n") }
         guard let output else { return 0 }
@@ -300,6 +305,7 @@ enum TranslateCLI {
               let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: output) as CFURL, UTType.png.identifier as CFString, 1, nil) else { return 1 }
         CGImageDestinationAddImage(dest, img, nil); CGImageDestinationFinalize(dest)
         print(String(format: "Рендер: %@ (масштаб %.0f%%, экранов %d)", output, settings.scale * 100, screens.count))
+        LlamaRunner.shared.shutdown()
         return 0
     }
 }

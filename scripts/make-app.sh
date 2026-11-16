@@ -30,6 +30,9 @@ mkdir -p "$APP/Contents/Frameworks"
 ditto .build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework \
   "$APP/Contents/Frameworks/Sparkle.framework"
 cp .build/artifacts/sparkle/Sparkle/LICENSE "$APP/Contents/Resources/Sparkle-LICENSE.txt"
+# llama.cpp (локальная модель перевода) — тоже во Frameworks
+ditto .build/artifacts/lumenreader/llama/llama.xcframework/macos-arm64_x86_64/llama.framework \
+  "$APP/Contents/Frameworks/llama.framework"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -78,6 +81,7 @@ SIGN="${IDENTITY:--}"
 RUNTIME=(); [[ "$SIGN" != "-" ]] && RUNTIME=(--options runtime --timestamp=none)
 # Sparkle — своими идентификаторами (без -i), затем само приложение
 codesign --force --deep "${RUNTIME[@]}" -s "$SIGN" "$APP/Contents/Frameworks/Sparkle.framework"
+codesign --force "${RUNTIME[@]}" -s "$SIGN" "$APP/Contents/Frameworks/llama.framework"
 codesign --force "${RUNTIME[@]}" -i "$BUNDLE_ID" -s "$SIGN" "$APP"
 echo "Подпись: ${IDENTITY:-ad-hoc}"
 codesign --verify --strict --verbose=2 "$APP"

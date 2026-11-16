@@ -6,6 +6,7 @@ struct TranslationPanel<T: BookTranslating>: View {
     @ObservedObject var translator: T
     @AppStorage("translateTarget") private var savedTarget = "ru"
     @Environment(\.colorScheme) private var scheme
+    @ObservedObject private var models = LocalModelStore.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -67,8 +68,15 @@ struct TranslationPanel<T: BookTranslating>: View {
 
             Divider()
 
+            LocalModelSection()
+                .onChange(of: models.state) { _, s in if s == .installed { translator.languagesInstalled() } }
+
+            Divider()
+
             VStack(alignment: .leading, spacing: 4) {
-                Label("Переводит системный переводчик Apple, текст не покидает Mac", systemImage: "lock")
+                Label(models.state == .installed
+                      ? "Переводят системный переводчик Apple и TranslateGemma, текст не покидает Mac"
+                      : "Переводит системный переводчик Apple, текст не покидает Mac", systemImage: "lock")
                     .fixedSize(horizontal: false, vertical: true)
                 Label("Чтобы перевести фрагмент, выделите его", systemImage: "character.cursor.ibeam")
             }
@@ -170,6 +178,42 @@ struct TranslationDownloader<T: BookTranslating>: ViewModifier {
         content.translationTask(translator.downloadConfig) { session in
             do { try await session.prepareTranslation() } catch {}
             await MainActor.run { translator.languagesInstalled() }
+        }
+    }
+}
+
+/// Локальная модель TranslateGemma: скачать, прогресс, удалить.
+struct LocalModelSection: View {
+    @ObservedObject private var store = LocalModelStore.shared
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Другие языки").font(.system(size: 12, weight: .semibold))
+            switch store.state {
+            case .installed:
+                Label("Модель TranslateGemma скачана", systemImage: "checkmark.circle")
+                    .font(.system(size: 12)).foregroundStyle(Brand.amberText(scheme))
+                Text("Переводит языки, которых нет у системного переводчика: сербский, чешский, хорватский и другие.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Button("Удалить модель", role: .destructive) { store.remove() }.controlSize(.small).tint(.red)
+            case .downloading(let p):
+                ProgressView(value: p).progressViewStyle(.linear).tint(Brand.amber)
+                HStack {
+                    Text("Скачано \(Int(p * 100))% из 2,5 ГБ").font(.system(size: 11)).foregroundStyle(.secondary).monospacedDigit()
+                    Spacer()
+                    Button("Отменить") { store.cancel() }.controlSize(.small)
+                }
+            case .notInstalled, .failed:
+                if case .failed(let m) = store.state {
+                    Label(m, systemImage: "exclamationmark.triangle").font(.system(size: 11)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text("Для сербского, чешского, хорватского и ещё десятков языков нужна локальная модель TranslateGemma (2,5 ГБ).")
+                    .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Button { store.download() } label: { Label("Скачать модель", systemImage: "arrow.down.circle") }
+                    .controlSize(.small)
+            }
         }
     }
 }

@@ -171,7 +171,8 @@ final class Translator: ObservableObject {
     /// Языки скачаны — снимаем ошибки и переводим заново.
     func languagesInstalled() {
         pendingDownload = nil
-        problems = problems.filter { if case .needsDownload = $0.value { return false }; return true }
+        problems = [:]
+        done = Set(store.keys().compactMap(Self.page))     // пропущенные (язык не поддерживался) — заново
         bookPause = nil
         requestVisible()
         if wholeBook, job == nil { startBook() }
