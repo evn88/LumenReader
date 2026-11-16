@@ -20,7 +20,7 @@
       "layers": [
         {
           "glass": true,
-          "image-name": "book.svg",
+          "image-name": "book.png",
           "name": "book"
         }
       ],
@@ -38,8 +38,7 @@
         {
           "glass": false,
           "image-name": "glow.png",
-          "name": "glow",
-          "blend-mode": "normal"
+          "name": "glow"
         }
       ],
       "shadow": {
