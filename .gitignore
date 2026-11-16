@@ -25,3 +25,6 @@ demo/*
 # релизная сборка
 build/
 *.dmg
+
+# Python
+__pycache__/
