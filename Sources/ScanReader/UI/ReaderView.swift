@@ -29,7 +29,8 @@ struct ReaderView: View {
     @AppStorage("languages") fileprivate var languagesCSV = "ru-RU,en-US"
 
     @State fileprivate var pos = ScreenPos(page: 0, sub: 0)
-    @State private var showOriginal = false
+    /// Вся книга оригиналом (кнопка на панели, «Открыть оригинал», сбой распознавания).
+    private var showOriginal: Bool { book.originalMode }
     @State private var showTOC = false
     @State private var showNotes = false
     @State private var showAppearance = false
@@ -137,12 +138,6 @@ struct ReaderView: View {
             .overlay(SwipeCatcher(onDelta: { turner.drag($0) },
                                   onEnd: { v in turner.endDrag(velocity: v) { turn($0) } })
                 .allowsHitTesting(false))
-            VStack(spacing: 1) {
-                Text(book.title).font(.system(size: 12)).foregroundStyle(secondary).lineLimit(1)
-                // распознавание и перевод в фоне — одной строкой, чтобы название не уезжало вверх
-                HStack(spacing: 12) { backgroundProgress; translationProgress }.opacity(chrome.visible ? 1 : 0)
-            }
-            .frame(maxWidth: 520).frame(height: TrafficLights.barHeight)
             HStack {
                 navButton("chevron.left", key: .leftArrow) { turner.turn(-1) { turn(-1) } }.disabled(back(visible[0]) == nil)
                 Spacer()
@@ -154,8 +149,21 @@ struct ReaderView: View {
             .opacity(chrome.visible ? 1 : 0)
             // полоса заголовка: перетаскивание окна и системный двойной клик (и при скрытой панели)
             TitleBarStrip().frame(height: TrafficLights.barHeight)
+            // над полосой заголовка: кнопка «остановить/продолжить» в строке прогресса нажимается,
+            // остальное пропускает клики к полосе (перетаскивание окна)
+            VStack(spacing: 1) {
+                Text(book.title).font(.system(size: 12)).foregroundStyle(secondary).lineLimit(1)
+                    .allowsHitTesting(false)
+                // распознавание и перевод в фоне — одной строкой, чтобы название не уезжало вверх
+                HStack(spacing: 12) { backgroundProgress; translationProgress }.opacity(chrome.visible ? 1 : 0)
+                    .allowsHitTesting(chrome.visible)
+            }
+            .frame(maxWidth: 520).frame(height: TrafficLights.barHeight)
             topBar.noFocusRing().opacity(chrome.visible ? 1 : 0)
             ChromeTracker(chrome: chrome).allowsHitTesting(false)
+        }
+        .overlay(alignment: .bottom) {
+            if let issue = book.recognitionIssue, showOriginal { recognitionBanner(issue) }
         }
         .ignoresSafeArea(edges: .top)
         .preferredColorScheme(theme.isDark ? .dark : .light)
@@ -196,17 +204,31 @@ struct ReaderView: View {
                 barButton("note.text", help: "Заметки и закладки") { showNotes.toggle() }
                     .tourAnchor("book.notes")
                     .popover(isPresented: $showNotes, arrowEdge: .bottom) { notesView }
-                barButton("doc.viewfinder", help: "Показать оригинал скана", selected: showOriginal) {
-                    showOriginal.toggle()
+                barButton("doc.viewfinder", help: showOriginal ? "Показать распознанный текст" : "Показать оригинал скана",
+                          selected: showOriginal) {
+                    book.setOriginalMode(!showOriginal)
                 }
                 .tourAnchor("book.original")
                 barButton("translate", help: "Перевод", selected: translator.showing) { showTranslation.toggle() }
                     .popover(isPresented: $showTranslation, arrowEdge: .bottom) { TranslationPanel(translator: translator) }
                 // страницы разворота: показывать сканом / распознать снова (сохраняется в meta.json)
                 Menu {
+                    Section("Книга") {
+                        Button(showOriginal ? "Показывать распознанный текст" : "Показывать оригинал") {
+                            book.setOriginalMode(!showOriginal)
+                        }
+                        if book.cached.count < book.count {
+                            Button(book.backgroundStopped ? "Продолжить фоновое распознавание" : "Остановить фоновое распознавание") {
+                                book.setBackgroundStopped(!book.backgroundStopped)
+                            }
+                            .disabled(showOriginal)
+                        }
+                    }
                     ForEach(Array(Set(visible.map(\.page))).sorted(), id: \.self) { i in
-                        Section("Страница \(book.displayNumber(for: i))") {
-                            if book.showsScan(i) {
+                        if !showOriginal { Section("Страница \(book.displayNumber(for: i))") {
+                            if book.fallbackScan.contains(i) {
+                                Button("Распознать заново") { book.retryRecognition(i) }
+                            } else if book.showsScan(i) {
                                 Button("Распознать заново") {
                                     if book.showScan.contains(i) { book.setShowScan(i, false) } else { book.showTextAnyway(i) }
                                 }
@@ -217,13 +239,15 @@ struct ReaderView: View {
                             Toggle("Улучшать скан", isOn: Binding(get: { book.wantsEnhancedScan(i) },
                                                               set: { book.setScanEnhance(i, $0) }))
                                 .disabled(!book.enhanceScans)
-                        }
+                        } }
                     }
                 } label: {
+                    // цвет — прямо на значке: у меню без рамки macOS 26 иначе красит его акцентом
                     Image(systemName: "text.viewfinder").font(.system(size: 15)).frame(width: 30, height: 30)
+                        .foregroundStyle(ink)
                 }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                .foregroundStyle(ink).help("Распознавание страниц разворота")
+                .foregroundStyle(ink).tint(ink).help("Распознавание страниц разворота")
                 .tourAnchor("book.pagemenu")
             }
             .padding(.horizontal, 4).padding(.vertical, 3)
@@ -290,9 +314,18 @@ struct ReaderView: View {
     @ViewBuilder
     private var backgroundProgress: some View {
         let done = book.cached.count
-        if done < book.count {
+        if showOriginal {
             HStack(spacing: 4) {
-                if let why = book.backgroundPause {
+                Image(systemName: "doc.viewfinder")
+                Text("Оригинал скана · распознавание выключено")
+            }
+            .font(.system(size: 10)).foregroundStyle(ink.opacity(0.4))
+        } else if done < book.count {
+            HStack(spacing: 4) {
+                if book.backgroundStopped {
+                    Image(systemName: "stop.circle")
+                    Text("Распознано \(done) из \(book.count) · остановлено")
+                } else if let why = book.backgroundPause {
                     Image(systemName: "pause.circle")
                     Text("Распознано \(done) из \(book.count) · пауза: \(why)")
                 } else {
@@ -302,8 +335,39 @@ struct ReaderView: View {
                 }
             }
             .font(.system(size: 10)).foregroundStyle(ink.opacity(0.4))
+            .allowsHitTesting(false)
             .help("Страницы распознаются в фоне, когда вы не листаете; результат сохраняется рядом с книгой")
+            Button { book.setBackgroundStopped(!book.backgroundStopped) } label: {
+                Image(systemName: book.backgroundStopped ? "play.fill" : "stop.fill")
+                    .font(.system(size: 8, weight: .bold))
+                    .frame(width: 18, height: 18)
+                    .background(Circle().fill(ink.opacity(0.08)))
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain).focusEffectDisabled()
+            .foregroundStyle(ink.opacity(0.55))
+            .help(book.backgroundStopped ? "Продолжить фоновое распознавание" : "Остановить фоновое распознавание")
+            .accessibilityLabel(book.backgroundStopped ? "Продолжить фоновое распознавание" : "Остановить фоновое распознавание")
         }
+    }
+
+    /// Распознавание не работает (ошибка Vision): книга сама переключилась на оригинал — объясняем и даём повторить.
+    private func recognitionBanner(_ issue: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle").foregroundStyle(Brand.amberText(theme.isDark ? .dark : .light))
+            Text("Распознать текст не удалось — показан оригинал скана")
+            Button("Попробовать снова") { book.setOriginalMode(false) }
+                .buttonStyle(.plain).focusEffectDisabled()
+                .foregroundStyle(Brand.amberText(theme.isDark ? .dark : .light)).fontWeight(.semibold)
+        }
+        .font(.system(size: 12))
+        .foregroundStyle(ink.opacity(0.85))
+        .padding(.horizontal, 14).padding(.vertical, 8)
+        .glassEffect(.regular, in: .capsule)
+        .help(issue)
+        .padding(.bottom, 34)
+        .opacity(chrome.visible ? 1 : 0.0)
+        .animation(.easeOut(duration: 0.2), value: chrome.visible)
     }
 
     /// «Переведено 40 из 340» — фоновый перевод всей книги.

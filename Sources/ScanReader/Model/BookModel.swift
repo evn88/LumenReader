@@ -248,8 +248,13 @@ final class BookModel: ObservableObject {
         return best.key
     }
 
-    init?(url: URL, palette: FontPalette = .original) {
-        guard let loaded = PageSource.load(url), !loaded.pages.isEmpty else { return nil }
+    convenience init?(url: URL, palette: FontPalette = .original) {
+        guard let loaded = PageSource.load(url) else { return nil }
+        self.init(url: url, loaded: loaded, palette: palette)
+    }
+
+    init?(url: URL, loaded: (title: String, pages: [PageSource]), palette: FontPalette = .original) {
+        guard !loaded.pages.isEmpty else { return nil }
         self.url = url
         title = loaded.title
         sources = loaded.pages
@@ -259,6 +264,7 @@ final class BookModel: ObservableObject {
         showScan = Set(meta.pagesShowOriginal ?? [])
         forceText = Set(meta.pagesForceText ?? [])
         noScanEnhance = Set(meta.pagesNoScanEnhance ?? [])
+        backgroundStopped = meta.recognitionPaused ?? false
         annotations = AnnotationStore(book: url)
         // страницы перерисовываются при изменении хайлайтов
         annotationsSink = annotations.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
@@ -297,6 +303,54 @@ final class BookModel: ObservableObject {
         request(i)
     }
 
+    // MARK: - режим «оригинал» (вся книга сканом, без распознавания)
+
+    /// Книга показывается оригиналом: страницы — сканы, распознавание (и фоновое) не запускается.
+    /// Включается пунктом «Открыть оригинал», кнопкой на панели или само — когда распознавание не работает.
+    @Published private(set) var originalMode = false
+    /// Почему распознавание не удалось (показ оригинала включён автоматически); nil — всё в порядке.
+    @Published private(set) var recognitionIssue: String?
+    /// Страницы, которые не удалось распознать: показываются сканом до повтора (только в этой сессии).
+    @Published private(set) var fallbackScan: Set<Int> = []
+    /// Подряд неудачных страниц: после двух распознавание считаем неработающим и включаем оригинал.
+    private var failuresInRow = 0
+
+    func setOriginalMode(_ on: Bool) {
+        guard on != originalMode, !closed else { return }
+        originalMode = on
+        if on {
+            // идущее распознавание видимых страниц и фон больше не нужны: скан показывается сразу
+            background?.cancel(); background = nil; backgroundPage = nil
+            queueRef.cancel(owner: owner)
+            inFlight = [:]
+        } else {
+            // назад к тексту: страницы-сканы этого режима распознаются заново
+            recognitionIssue = nil
+            failuresInRow = 0
+            fallbackScan = []
+            failed = [:]
+            pages = pages.filter { !$0.value.scanOnly || showScan.contains($0.key) }
+            reflowMemo = [:]
+        }
+        if !lastVisible.isEmpty { prefetch(visible: lastVisible) }
+    }
+
+    /// Распознавание страницы не удалось: страница показывается оригиналом вместо ошибки.
+    private func recognitionFailed(_ i: Int, _ e: Error) {
+        let why = Self.describe(e)
+        recognitionLog.error("стр. \(i + 1): \(why, privacy: .public)")
+        // файл страницы не читается — оригинал тоже не показать
+        if e is PageError { failed[i] = why; return }
+        failuresInRow += 1
+        fallbackScan.insert(i)
+        if failuresInRow >= 2 {
+            recognitionIssue = why
+            setOriginalMode(true)
+        } else if window.contains(i) {
+            start(i, priority: .visible)        // тот же запуск, но уже без OCR — только скан
+        }
+    }
+
     // MARK: - показывать скан вместо распознанного текста
 
     /// Страницы, которые читатель велел показывать сканом (синхронизируется через meta.json).
@@ -307,7 +361,9 @@ final class BookModel: ObservableObject {
     @Published private(set) var unreliable: Set<Int> = []
 
     /// Показывать ли эту страницу сканом.
-    func showsScan(_ i: Int) -> Bool { showScan.contains(i) || (unreliable.contains(i) && !forceText.contains(i)) }
+    func showsScan(_ i: Int) -> Bool {
+        showScan.contains(i) || fallbackScan.contains(i) || (unreliable.contains(i) && !forceText.contains(i))
+    }
 
     func setShowScan(_ i: Int, _ on: Bool) {
         if on { showScan.insert(i); forceText.remove(i) } else { showScan.remove(i) }
@@ -330,7 +386,7 @@ final class BookModel: ObservableObject {
             try? FileManager.default.removeItem(at: cache.dir.appendingPathComponent(f))
         }
         cached.remove(i)
-        showScan.remove(i); forceText.remove(i); unreliable.remove(i)
+        showScan.remove(i); forceText.remove(i); unreliable.remove(i); fallbackScan.remove(i)
         saveScanPrefs()
         pages[i] = nil; failed[i] = nil
         request(i)
@@ -347,6 +403,13 @@ final class BookModel: ObservableObject {
                 self.pages[i] = page
             }
         }
+    }
+
+    /// Распознать снова страницу, которая не распозналась (показана оригиналом).
+    func retryRecognition(_ i: Int) {
+        fallbackScan.remove(i); failed[i] = nil; failuresInRow = 0
+        if pages[i]?.scanOnly == true, !showScan.contains(i) { pages[i] = nil }
+        request(i)
     }
 
     private func saveScanPrefs() {
@@ -412,6 +475,8 @@ final class BookModel: ObservableObject {
     /// Почему фон стоит: nil — работает или ждёт простоя.
     @Published private(set) var backgroundPause: String?
     @Published private(set) var backgroundPage: Int?
+    /// Читатель остановил фоновое распознавание книги (сохраняется в meta.json; видимые страницы распознаются).
+    @Published private(set) var backgroundStopped = false
     var idleDelay: TimeInterval = 3
     private var background: Task<Void, Never>?
     private var focus = 0
@@ -421,11 +486,27 @@ final class BookModel: ObservableObject {
         cached = Set((0..<count).filter { c.has($0) })
     }
 
+    func setBackgroundStopped(_ stop: Bool) {
+        guard stop != backgroundStopped else { return }
+        backgroundStopped = stop
+        Sidecar.update(url) { $0.recognitionPaused = stop ? true : nil }
+        if stop {
+            background?.cancel(); background = nil; backgroundPage = nil
+            queueRef.cancel(owner: owner, priorities: [.background])
+        } else {
+            touch()
+        }
+    }
+
+    /// Фон сейчас работает или ждёт простоя (есть что распознавать и он не остановлен).
+    var backgroundActive: Bool { !backgroundStopped && !originalMode && cached.count < count }
+
     /// Любое действие читателя: фон останавливается и стартует снова после простоя.
     private func touch() {
         guard !closed else { return }
         background?.cancel()
         queueRef.cancel(owner: owner, priorities: [.background])
+        guard !backgroundStopped, !originalMode else { background = nil; backgroundPage = nil; return }
         background = Task { [weak self] in
             try? await Task.sleep(for: .seconds(self?.idleDelay ?? 3))
             guard !Task.isCancelled else { return }
@@ -437,7 +518,7 @@ final class BookModel: ObservableObject {
     /// Результат — только на диск; в памяти остаётся, лишь если попал в окно чтения.
     /// Страницы «показывать сканом» не распознаются.
     private func runBackground() async {
-        while !Task.isCancelled && !closed {
+        while !Task.isCancelled && !closed && !backgroundStopped && !originalMode {
             // упреждение и видимые страницы всегда впереди
             guard queue.isEmpty, inFlight.isEmpty else {
                 try? await Task.sleep(for: .seconds(1)); continue
@@ -448,7 +529,8 @@ final class BookModel: ObservableObject {
             }
             backgroundPause = nil
             let order = Array(focus..<count) + Array((0..<focus).reversed())
-            guard let i = order.first(where: { !cached.contains($0) && failed[$0] == nil && !showScan.contains($0) }) else { break }
+            guard let i = order.first(where: { !cached.contains($0) && failed[$0] == nil && !showScan.contains($0) && !fallbackScan.contains($0) })
+            else { break }
             backgroundPage = i
             let gen = generation
             let outcome = await run(i, priority: .background)
@@ -457,7 +539,7 @@ final class BookModel: ObservableObject {
             case .success(let page):
                 accept(i, page)
             case .failure(let e):
-                if !(e is CancellationError) { failed[i] = Self.describe(e) }
+                if !(e is CancellationError) { recognitionFailed(i, e) }
             }
         }
         backgroundPage = nil
@@ -533,7 +615,7 @@ final class BookModel: ObservableObject {
             self.inFlight[i] = nil
             switch outcome {
             case .success(let page): self.accept(i, page)
-            case .failure(let e): if !(e is CancellationError) { self.failed[i] = Self.describe(e) }
+            case .failure(let e): if !(e is CancellationError) { self.recognitionFailed(i, e) }
             }
         }
     }
@@ -543,7 +625,8 @@ final class BookModel: ObservableObject {
         let source = sources[i], store = cache
         // эталонные шрифты (Times/Helvetica) для подбора гарнитуры: шрифты темы её искажали
         let analyzer = LayoutAnalyzer(palette: .original, languages: languages, enhanceFigures: enhanceFigures)
-        let scanOnly = showScan.contains(i) && !cached.contains(i)
+        // оригинал книги или не распознавшаяся страница — только растр, даже если раскладка в кеше
+        let scanOnly = (showScan.contains(i) && !cached.contains(i)) || originalMode || fallbackScan.contains(i)
         let wantLeveled = showsScan(i)
         return await withCheckedContinuation { (k: CheckedContinuation<Result<AnalyzedPage, Error>, Never>) in
             queueRef.submit(owner: owner, page: i, priority: priority) { token in
@@ -552,6 +635,11 @@ final class BookModel: ObservableObject {
                         try token.check()
                         guard let image = source.render() else { throw PageError.unreadable }
                         return AnalyzedPage(scanOnly: image)
+                    }
+                    // отладка автоперехода на оригинал: SR_OCR_FAIL=1 — распознавание «падает», как при сбое Vision
+                    if ProcessInfo.processInfo.environment["SR_OCR_FAIL"] == "1" {
+                        throw NSError(domain: "CRImageReaderErrorDomain", code: 1,
+                                      userInfo: [NSLocalizedDescriptionKey: "Отладка: распознавание недоступно"])
                     }
                     // раскладка и улучшенные картинки сохраняются рядом с книгой (общая iCloud-папка)
                     var page = try LayoutCache.process(source, index: i, cache: store, analyzer: analyzer, token: token).page
@@ -564,6 +652,7 @@ final class BookModel: ObservableObject {
 
     private func accept(_ i: Int, _ page: AnalyzedPage) {
         if !page.scanOnly {
+            failuresInRow = 0
             cached.insert(i)
             notePrintedNumber(i, page.layout)
             reflowMemo = [:]        // соседи узнают о переносе через границу страницы

@@ -90,6 +90,17 @@ struct ScanReaderApp: App {
             print("Итого:", counts)
             exit(0)
         }
+        //   ScanReader --scan-library <папка> — время чтения полки: с нуля и повторно (по отметкам изменений)
+        if let i = args.firstIndex(of: "--scan-library"), args.count > i + 1 {
+            let folder = URL(fileURLWithPath: args[i + 1])
+            var t0 = Date()
+            let cold = LibraryStore.scan(folder, previous: [:])
+            print(String(format: "С нуля: %d книг за %.2f с", cold.count, Date().timeIntervalSince(t0)))
+            t0 = Date()
+            let warm = LibraryStore.scan(folder, previous: Dictionary(cold.map { ($0.book.id, $0) }, uniquingKeysWith: { a, _ in a }))
+            print(String(format: "Повторно: %d книг за %.2f с", warm.count, Date().timeIntervalSince(t0)))
+            exit(0)
+        }
         //   ScanReader --import-apple-books --dry-run          — что будет импортировано (только числа)
         //   ScanReader --import-apple-books --to <папка>       — копирование своих PDF/EPUB
         if args.contains("--import-apple-books") {
@@ -133,11 +144,29 @@ struct ScanReaderApp: App {
     }
 }
 
+/// Как открыть книгу из библиотеки: распознанным текстом (по умолчанию) или оригиналом скана.
+/// Окно книги одно на путь: если оно уже открыто, просьба применяется к нему.
+@MainActor
+final class OpenModeCenter: ObservableObject {
+    static let shared = OpenModeCenter()
+    /// Путь книги → открыть оригиналом (true) или с распознаванием (false).
+    @Published private(set) var requests: [String: Bool] = [:]
+
+    func request(_ path: String, original: Bool) { requests[path] = original }
+
+    func take(_ path: String) -> Bool? {
+        guard let r = requests[path] else { return nil }
+        requests[path] = nil
+        return r
+    }
+}
+
 /// Окно читалки: книга по пути (PDF, сканы, картинка; EPUB — отдельный просмотрщик).
 struct ReaderWindow: View {
     let path: String
     @State private var book: BookModel?
     @State private var failed = false
+    @ObservedObject private var modes = OpenModeCenter.shared
 
     var body: some View {
         Group {
@@ -156,8 +185,16 @@ struct ReaderWindow: View {
         .onDisappear { book?.close() }
         .task(id: path) {
             guard LibraryStore.kind(of: URL(fileURLWithPath: path)) != .epub else { return }
-            book = BookModel(url: URL(fileURLWithPath: path))
+            let url = URL(fileURLWithPath: path)
+            // PDF на сотни страниц открывается не мгновенно: не держим главный поток
+            let loaded = await Task.detached(priority: .userInitiated) { PageSource.load(url) }.value
+            book = loaded.flatMap { BookModel(url: url, loaded: $0) }
+            if let original = modes.take(path) { book?.setOriginalMode(original) }
             failed = book == nil
+        }
+        .onChange(of: modes.requests[path]) { _, r in
+            guard r != nil, let book, let original = modes.take(path) else { return }
+            book.setOriginalMode(original)
         }
     }
 }

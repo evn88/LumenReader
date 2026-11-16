@@ -41,10 +41,13 @@ struct PageView: View {
                     .foregroundStyle(Color(cgColor: theme.secondary))
                 }
             } else {
+                // страница ещё распознаётся или грузится (кеш, iCloud, скан) — явный лоадер, а не пустой лист
                 placeholder {
-                    VStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        if slow {
+                    VStack(spacing: 10) {
+                        ProgressView().controlSize(.regular)
+                        Text(loadingText).font(.callout)
+                            .foregroundStyle(Color(cgColor: theme.secondary))
+                        if slow, !book.originalMode {
                             Text("Распознавание идёт дольше обычного…").font(.caption)
                                 .foregroundStyle(Color(cgColor: theme.secondary))
                             Button("Показать скан") { book.setShowScan(index, true); book.retry(index) }.controlSize(.small)
@@ -59,6 +62,12 @@ struct PageView: View {
             try? await Task.sleep(for: .seconds(30))
             if !Task.isCancelled, book.pages[index] == nil { slow = true }
         }
+    }
+
+    /// Что сейчас происходит со страницей: распознавание новой или загрузка уже готовой / скана.
+    private var loadingText: String {
+        if book.originalMode || book.showsScan(index) { return "Загружаю страницу…" }
+        return book.cached.contains(index) ? "Загружаю страницу…" : "Распознаю текст страницы…"
     }
 
     private func placeholder<V: View>(@ViewBuilder _ v: () -> V) -> some View {
@@ -119,7 +128,23 @@ struct PageView: View {
                 }
                 .opacity(original ? 1 : 0)
 
-                if book.unreliable.contains(index), asScan, !book.showScan.contains(index), !showOriginal {
+                if book.fallbackScan.contains(index), !showOriginal {
+                    // распознавание страницы не удалось — вместо ошибки оригинал и тихая подсказка
+                    VStack {
+                        Spacer()
+                        Button { book.retryRecognition(index) } label: {
+                            Label("Не удалось распознать — показан оригинал. Повторить", systemImage: "arrow.clockwise")
+                                .font(.system(size: 11))
+                                .padding(.horizontal, 10).padding(.vertical, 5)
+                                .background(Capsule().fill(Color(cgColor: theme.paper).opacity(0.92)))
+                                .overlay(Capsule().strokeBorder(Color(cgColor: theme.secondary).opacity(0.4)))
+                        }
+                        .buttonStyle(.plain).focusEffectDisabled().foregroundStyle(Color(cgColor: theme.secondary))
+                        .help(book.recognitionIssue ?? "Распознать страницу ещё раз")
+                        .padding(.bottom, 8)
+                    }
+                    .frame(maxWidth: .infinity)
+                } else if book.unreliable.contains(index), asScan, !book.showScan.contains(index), !showOriginal {
                     VStack {
                         Spacer()
                         Button { book.showTextAnyway(index) } label: {

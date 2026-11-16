@@ -202,7 +202,9 @@ struct LibraryView: View {
 
     @ViewBuilder
     private var content: some View {
-        if store.books.isEmpty {
+        if store.books.isEmpty && !store.loaded {
+            LibraryLoadingView()
+        } else if store.books.isEmpty {
             EmptyLibraryView(scanning: store.scanning, importFiles: chooseFiles)
         } else if grid {
             ScrollView {
@@ -304,7 +306,14 @@ struct LibraryView: View {
 
     @ViewBuilder
     private func menu(_ book: LibraryBook) -> some View {
-        Button("Открыть") { open(book) }
+        if book.kind == .epub {
+            Button("Открыть") { open(book) }
+        } else {
+            // по умолчанию (двойной клик, Return) — с распознаванием
+            Button("Открыть с распознаванием") { open(book, original: false) }
+            Button("Открыть оригинал") { open(book, original: true) }
+        }
+        Divider()
         Menu("Коллекции") {
             ForEach(store.collections, id: \.self) { c in
                 Button { store.toggle(book, in: c) } label: {
@@ -317,8 +326,13 @@ struct LibraryView: View {
         Button("Показать в Finder") { NSWorkspace.shared.activateFileViewerSelecting([book.url]) }
     }
 
-    private func open(_ book: LibraryBook) {
+    /// Двойной клик / Return: новое окно — с распознаванием, уже открытое — как есть.
+    private func open(_ book: LibraryBook) { open(book, original: nil) }
+
+    /// Пункты меню: открыть (или переключить уже открытое окно) с распознаванием или оригиналом.
+    private func open(_ book: LibraryBook, original: Bool?) {
         selection = book.id
+        if let original, book.kind != .epub { OpenModeCenter.shared.request(book.url.path, original: original) }
         openWindow(id: "reader", value: book.url.path)
     }
 
@@ -517,6 +531,45 @@ struct OverlayScrollers: NSViewRepresentable {
     }
     func makeNSView(context: Context) -> Probe { Probe() }
     func updateNSView(_ v: Probe, context: Context) { DispatchQueue.main.async { v.apply() } }
+}
+
+/// Первое чтение папки (снимка полки ещё нет): силуэты обложек и лоадер вместо пустого окна.
+struct LibraryLoadingView: View {
+    @State private var pulse = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(spacing: 10) {
+                    Text("Все").font(.system(.title, design: .serif).weight(.semibold))
+                    ProgressView().controlSize(.small)
+                    Text("Загружаю библиотеку…").font(.callout).foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .combine)
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 152, maximum: 184), spacing: 24, alignment: .top)],
+                          alignment: .leading, spacing: 32) {
+                    ForEach(0..<12, id: \.self) { i in
+                        VStack(alignment: .leading, spacing: 8) {
+                            RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.07))
+                                .aspectRatio(0.7, contentMode: .fit)
+                                .frame(height: 216, alignment: .bottom)
+                                .frame(maxWidth: .infinity, alignment: .bottom)
+                                .padding(8)
+                            RoundedRectangle(cornerRadius: 3).fill(Color.primary.opacity(0.07)).frame(width: 120, height: 10)
+                            RoundedRectangle(cornerRadius: 3).fill(Color.primary.opacity(0.05)).frame(width: 72, height: 8)
+                        }
+                        .opacity(pulse ? 0.55 : 1)
+                        .animation(reduceMotion ? nil : .easeInOut(duration: 0.9).repeatForever().delay(Double(i % 6) * 0.08), value: pulse)
+                    }
+                }
+                .accessibilityHidden(true)
+            }
+            .padding(32)
+        }
+        .scrollDisabled(true)
+        .onAppear { pulse = true }
+    }
 }
 
 /// Пустая библиотека: лампа над раскрытой книгой.
