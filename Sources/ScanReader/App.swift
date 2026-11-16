@@ -45,6 +45,31 @@ struct ScanReaderApp: App {
                                   target: args.count > i + 3 ? args[i + 3] : "ru",
                                   output: args.count > i + 4 ? args[i + 4] : nil))
         }
+        //   ScanReader --llm <модель.gguf> <язык-источник> <язык-цель> <текст.txt> — проверка локальной модели перевода
+        if let i = args.firstIndex(of: "--llm"), args.count > i + 4 {
+            let model = URL(fileURLWithPath: args[i + 1]), s = args[i + 2], t = args[i + 3]
+            let text = (try? String(contentsOfFile: args[i + 4], encoding: .utf8)) ?? ""
+            var done = false
+            Task.detached {
+                let t0 = Date()
+                let sName = LocalModelTranslator.languageName(s) ?? s, tName = LocalModelTranslator.languageName(t) ?? t
+                do {
+                    let out: String
+                    if model.lastPathComponent.lowercased().contains("translategemma") {
+                        out = try await LlamaRunner.shared.generate(prompt: LocalModelTranslator.prompt(text, source: (sName, s), target: (tName, t)),
+                                                                    model: model, maxTokens: 1500)
+                    } else {
+                        out = try await LlamaRunner.shared.generate(user: LocalModelTranslator.instruction(text, source: sName, target: tName),
+                                                                    model: model, maxTokens: 1500)
+                    }
+                    print(String(format: "(%.1f с)\n", Date().timeIntervalSince(t0)) + out)
+                } catch { print("Ошибка: \(error.localizedDescription)") }
+                done = true
+            }
+            while !done { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
+            LlamaRunner.shared.shutdown()
+            exit(0)
+        }
         //   ScanReader --import-apple-books --dry-run          — что будет импортировано (только числа)
         //   ScanReader --import-apple-books --to <папка>       — копирование своих PDF/EPUB
         if args.contains("--import-apple-books") {

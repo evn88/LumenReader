@@ -72,7 +72,7 @@ enum TranslationProblem: LocalizedError, Equatable {
             return "Нужно скачать языки для перевода: \(LanguageGuess.title(s)) → \(LanguageGuess.title(t))"
         case .unsupported(let s, let t):
             return "Системный переводчик не знает пару \(LanguageGuess.title(s)) → \(LanguageGuess.title(t)). "
-                + "Скачайте модель TranslateGemma в панели «Перевод»."
+                + "Скачайте модель Gemma 4 в панели «Перевод»."
         case .failed(let m):
             return "Не удалось перевести: \(m)"
         }

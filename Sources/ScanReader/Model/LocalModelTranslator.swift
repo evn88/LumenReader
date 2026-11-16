@@ -2,15 +2,19 @@ import Combine
 import Foundation
 import llama
 
-/// Локальная модель перевода TranslateGemma 4B (GGUF, llama.cpp на Metal) — для языков, которых нет
+/// Локальная модель перевода Gemma 4 E4B (официальная QAT-сборка Google, GGUF, llama.cpp на Metal) — для языков, которых нет
 /// у системного переводчика (сербский, чешский, хорватский…). Скачивается по кнопке в панели «Перевод».
 final class LocalModelTranslator: TranslationEngine, @unchecked Sendable {
     static let shared = LocalModelTranslator()
-    let name = "TranslateGemma"
+    let name = "Gemma 4"
 
-    static let fileName = "translategemma-4b-it.Q4_K_M.gguf"
-    static let downloadURL = URL(string: "https://huggingface.co/mradermacher/translategemma-4b-it-GGUF/resolve/main/translategemma-4b-it.Q4_K_M.gguf")!
-    static let approximateSize: Int64 = 2_490_000_000
+    /// Gemma 4 E4B (март 2026) переводит точнее TranslateGemma 4B (январь 2026, на базе Gemma 3):
+    /// сравнение на сербском, англ→рус и рус→англ — меньше пересказа и отсебятины. Лицензия Apache 2.0.
+    static let fileName = "gemma-4-E4B_q4_0-it.gguf"
+    static let downloadURL = URL(string: "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/main/gemma-4-E4B_q4_0-it.gguf")!
+    static let approximateSize: Int64 = 5_150_000_000
+    /// Прежние модели — удаляются после перехода на новую.
+    static let legacyFiles = ["translategemma-4b-it.Q4_K_M.gguf"]
 
     static var file: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -31,18 +35,25 @@ final class LocalModelTranslator: TranslationEngine, @unchecked Sendable {
         var out: [String] = []
         for t in texts {
             try Task.checkCancellation()
-            let prompt = Self.prompt(t, source: (sName, LanguageGuess.base(source)), target: (tName, LanguageGuess.base(target)))
-            out.append(try await LlamaRunner.shared.generate(prompt: prompt, model: Self.file, maxTokens: max(64, t.count * 2)))
+            out.append(try await LlamaRunner.shared.generate(user: Self.instruction(t, source: sName, target: tName),
+                                                             model: Self.file, maxTokens: max(64, t.count * 2)))
         }
         return out
     }
 
-    /// Название языка по-английски — так его ждёт шаблон TranslateGemma.
+    /// Название языка по-английски — для инструкции модели.
     static func languageName(_ code: String) -> String? {
         Locale(identifier: "en").localizedString(forLanguageCode: LanguageGuess.base(code))
     }
 
-    /// Промпт из шаблона чата TranslateGemma (chat_template.jinja модели), без BOS — его добавит токенизатор.
+    /// Инструкция для универсальной модели (без своего шаблона перевода).
+    static func instruction(_ text: String, source: String, target: String) -> String {
+        "Translate the following \(source) text into \(target). Keep the meaning, tone and paragraph breaks. "
+            + "Do not add, omit, summarize or explain anything. Output only the \(target) translation.\n\n"
+            + text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Промпт TranslateGemma (из chat_template.jinja модели) — для сравнения моделей через --llm.
     static func prompt(_ text: String, source: (String, String), target: (String, String)) -> String {
         "<start_of_turn>user\nYou are a professional \(source.0) (\(source.1)) to \(target.0) (\(target.1)) translator. "
             + "Your goal is to accurately convey the meaning and nuances of the original \(source.0) text while adhering to "
@@ -81,6 +92,45 @@ final class LlamaRunner: @unchecked Sendable {
 
     /// Выгрузить модель сейчас (выход из приложения, удаление модели).
     func shutdown() { queue.sync { unload() } }
+
+    /// Промпт по шаблону чата самой модели (для универсальных моделей, напр. Gemma 4).
+    func generate(user: String, model url: URL, maxTokens: Int) async throws -> String {
+        let cancelled = CancelFlag()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (k: CheckedContinuation<String, Error>) in
+                queue.async {
+                    k.resume(with: Result {
+                        try self.ensureLoaded(url)
+                        guard let m = self.model else { throw Failure.load }
+                        var prompt = try Self.chatPrompt(m, user: user)
+                        if prompt.hasPrefix("<bos>") { prompt.removeFirst(5) }     // BOS добавит токенизатор
+                        return try self.run(prompt: prompt, url: url, maxTokens: maxTokens, cancelled: cancelled)
+                    })
+                }
+            }
+        } onCancel: { cancelled.set() }
+    }
+
+    private static func chatPrompt(_ model: OpaquePointer, user: String) throws -> String {
+        let tmpl = llama_model_chat_template(model, nil)
+        // Gemma 4: свой формат ходов, встроенный разборщик шаблонов llama.cpp его не знает
+        if let t = tmpl, String(cString: t).contains("<|turn>") {
+            return "<|turn>user\n\(user)<turn|>\n<|turn>model\n"
+        }
+        return try "user".withCString { role in
+            try user.withCString { content in
+                var msg = llama_chat_message(role: role, content: content)
+                var buf = [CChar](repeating: 0, count: user.utf8.count * 2 + 512)
+                var n = llama_chat_apply_template(tmpl, &msg, 1, true, &buf, Int32(buf.count))
+                if n > Int32(buf.count) {
+                    buf = [CChar](repeating: 0, count: Int(n) + 1)
+                    n = llama_chat_apply_template(tmpl, &msg, 1, true, &buf, Int32(buf.count))
+                }
+                guard n > 0 else { throw Failure.decode }
+                return String(decoding: buf.prefix(Int(n)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+            }
+        }
+    }
 
     func generate(prompt: String, model url: URL, maxTokens: Int) async throws -> String {
         let cancelled = CancelFlag()
@@ -170,7 +220,7 @@ final class LlamaRunner: @unchecked Sendable {
         }
         var text = String(decoding: bytes.map { UInt8(bitPattern: $0) }, as: UTF8.self)
         // на всякий случай: служебные метки, если модель их напечатала текстом
-        for mark in ["<end_of_turn>", "<start_of_turn>"] {
+        for mark in ["<end_of_turn>", "<start_of_turn>", "<turn|>", "<|turn>"] {
             if let r = text.range(of: mark) { text = String(text[..<r.lowerBound]) }
         }
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -190,6 +240,8 @@ final class LocalModelStore: NSObject, ObservableObject, URLSessionDownloadDeleg
 
     override init() {
         super.init()
+        let dir = LocalModelTranslator.file.deletingLastPathComponent()
+        for old in LocalModelTranslator.legacyFiles { try? FileManager.default.removeItem(at: dir.appendingPathComponent(old)) }
         state = LocalModelTranslator.shared.isInstalled ? .installed : .notInstalled
     }
 

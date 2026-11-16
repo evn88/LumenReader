@@ -75,7 +75,7 @@ struct TranslationPanel<T: BookTranslating>: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 Label(models.state == .installed
-                      ? "Переводят системный переводчик Apple и TranslateGemma, текст не покидает Mac"
+                      ? "Переводят системный переводчик Apple и Gemma 4, текст не покидает Mac"
                       : "Переводит системный переводчик Apple, текст не покидает Mac", systemImage: "lock")
                     .fixedSize(horizontal: false, vertical: true)
                 Label("Чтобы перевести фрагмент, выделите его", systemImage: "character.cursor.ibeam")
@@ -182,7 +182,7 @@ struct TranslationDownloader<T: BookTranslating>: ViewModifier {
     }
 }
 
-/// Локальная модель TranslateGemma: скачать, прогресс, удалить.
+/// Локальная модель Gemma 4: скачать, прогресс, удалить.
 struct LocalModelSection: View {
     @ObservedObject private var store = LocalModelStore.shared
     @Environment(\.colorScheme) private var scheme
@@ -192,7 +192,7 @@ struct LocalModelSection: View {
             Text("Другие языки").font(.system(size: 12, weight: .semibold))
             switch store.state {
             case .installed:
-                Label("Модель TranslateGemma скачана", systemImage: "checkmark.circle")
+                Label("Модель Gemma 4 скачана", systemImage: "checkmark.circle")
                     .font(.system(size: 12)).foregroundStyle(Brand.amberText(scheme))
                 Text("Переводит языки, которых нет у системного переводчика: сербский, чешский, хорватский и другие.")
                     .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -200,7 +200,7 @@ struct LocalModelSection: View {
             case .downloading(let p):
                 ProgressView(value: p).progressViewStyle(.linear).tint(Brand.amber)
                 HStack {
-                    Text("Скачано \(Int(p * 100))% из 2,5 ГБ").font(.system(size: 11)).foregroundStyle(.secondary).monospacedDigit()
+                    Text("Скачано \(Int(p * 100))% из 5,2 ГБ").font(.system(size: 11)).foregroundStyle(.secondary).monospacedDigit()
                     Spacer()
                     Button("Отменить") { store.cancel() }.controlSize(.small)
                 }
@@ -209,7 +209,7 @@ struct LocalModelSection: View {
                     Label(m, systemImage: "exclamationmark.triangle").font(.system(size: 11)).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Text("Для сербского, чешского, хорватского и ещё десятков языков нужна локальная модель TranslateGemma (2,5 ГБ).")
+                Text("Для сербского, чешского, хорватского и ещё десятков языков нужна локальная модель Gemma 4 от Google (5,2 ГБ).")
                     .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Button { store.download() } label: { Label("Скачать модель", systemImage: "arrow.down.circle") }
                     .controlSize(.small)

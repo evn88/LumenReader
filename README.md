@@ -26,7 +26,7 @@ Website: [ai-soft.app](https://ai-soft.app) · [Русская версия](REA
 - **Original on demand**: show the scan for a page (or automatically when recognition is unreliable), with
   enhancement — even background, crisp table lines, contrast.
 - **EPUB** with Books-like pagination, themes, fonts, TOC, search.
-- **Translation on device**: the open page, the whole book in the background, or a selected passage. Uses the built-in Apple translator (~20 languages, nothing to download); for other languages (Serbian, Czech, Croatian…) an optional TranslateGemma 4B model (2.5 GB, llama.cpp on Metal). Translations are cached next to the book in `.scanreader/` and sync via iCloud.
+- **Translation on device**: the open page, the whole book in the background, or a selected passage. Uses the built-in Apple translator (~20 languages, nothing to download); for other languages (Serbian, Czech, Croatian…) an optional Gemma 4 E4B model from Google (5.2 GB, llama.cpp on Metal). Translations are cached next to the book in `.scanreader/` and sync via iCloud.
 - **Highlights & notes** (5 colors + underline) on scans and EPUB, a Notes panel, bookmarks.
 - **Library** like Apple Books: covers, collections, progress, import from Apple Books (your own PDF/EPUB; DRM books are listed, not imported).
 - **iCloud sync without a server**: the library is a folder (e.g. a shared iCloud Drive folder); recognition cache,
