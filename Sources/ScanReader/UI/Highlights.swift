@@ -107,12 +107,18 @@ struct HighlightMenu: View {
     var onNote: (String) -> Void
     var onCopy: () -> Void
     var onDelete: () -> Void
+    /// Язык перевода для кнопки «Перевести» (nil — кнопки нет).
+    var translateTo: String? = nil
+    /// false — только копирование и перевод (например, на переведённом тексте хайлайты не ставятся).
+    var allowsAnnotations = true
 
     @State private var editingNote = false
+    @State private var translating = false
     @State private var note = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if allowsAnnotations {
             HStack(spacing: 8) {
                 ForEach(HighlightStyle.allCases) { st in
                     Button { onStyle(st) } label: {
@@ -133,6 +139,7 @@ struct HighlightMenu: View {
                 }
             }
             Divider()
+            }
             if editingNote {
                 TextEditor(text: $note).font(.callout).frame(width: 240, height: 80)
                     .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(0.15)))
@@ -143,12 +150,23 @@ struct HighlightMenu: View {
                 }
                 .controlSize(.small)
             } else {
-                Button { note = existing?.note ?? ""; editingNote = true } label: {
-                    Label(existing?.note?.isEmpty == false ? "Изменить заметку" : "Добавить заметку", systemImage: "square.and.pencil")
+                if allowsAnnotations {
+                    Button { note = existing?.note ?? ""; editingNote = true } label: {
+                        Label(existing?.note?.isEmpty == false ? "Изменить заметку" : "Добавить заметку", systemImage: "square.and.pencil")
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
                 Button { onCopy() } label: { Label("Копировать", systemImage: "doc.on.doc") }
                     .buttonStyle(.plain).keyboardShortcut("c")
+                if let target = translateTo {
+                    if translating {
+                        Divider()
+                        SnippetTranslation(text: text, target: target)
+                    } else {
+                        Button { translating = true } label: { Label("Перевести", systemImage: "translate") }
+                            .buttonStyle(.plain).keyboardShortcut("t")
+                    }
+                }
                 if existing != nil {
                     Button(role: .destructive) { onDelete() } label: { Label("Удалить хайлайт", systemImage: "trash") }
                         .buttonStyle(.plain).foregroundStyle(.red)
@@ -156,7 +174,9 @@ struct HighlightMenu: View {
             }
         }
         .padding(12)
-        .frame(minWidth: 220, alignment: .leading)
+        // с переводом — постоянная ширина: всплывающее окно не растёт вширь после открытия
+        .frame(minWidth: 220, idealWidth: translateTo != nil ? 300 : nil, alignment: .leading)
+        .frame(width: translateTo != nil ? 300 : nil, alignment: .leading)
     }
 }
 

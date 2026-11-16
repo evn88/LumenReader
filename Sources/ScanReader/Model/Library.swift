@@ -27,6 +27,8 @@ struct BookMeta: Codable, Equatable {
     var pagesNoScanEnhance: [Int]?
     var importedFrom: String?
     var importedAt: Date?
+    /// Перевод: язык, показ перевода, фоновый перевод всей книги.
+    var translation: TranslationMeta?
 }
 
 enum Sidecar {

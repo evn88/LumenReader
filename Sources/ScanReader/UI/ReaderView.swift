@@ -40,6 +40,14 @@ struct ReaderView: View {
     @State fileprivate var bookmarks: Set<Int> = []
     @StateObject private var turner = PageTurner()
     @StateObject private var chrome = ChromeVisibility()
+    @StateObject fileprivate var translator: Translator
+    @State private var showTranslation = false
+
+    init(book: BookModel) {
+        self.book = book
+        _translator = StateObject(wrappedValue: Translator(book: book,
+                                                           target: UserDefaults.standard.string(forKey: "translateTarget") ?? "ru"))
+    }
 
     private var theme: ReaderTheme {
         let t = ReaderTheme.named(themeName)
@@ -107,7 +115,7 @@ struct ReaderView: View {
                 ForEach(visible, id: \.self) { p in
                     VStack(spacing: 12) {
                         PageView(book: book, index: p.page, sub: p.sub, theme: theme, settings: settings,
-                                 showOriginal: showOriginal)
+                                 showOriginal: showOriginal, translator: translator)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                             .tourAnchor(p == visible[0] ? "book.page" : "book.page2")
                         // номер под каждой страницей разворота, как в Books
@@ -131,7 +139,8 @@ struct ReaderView: View {
                 .allowsHitTesting(false))
             VStack(spacing: 1) {
                 Text(book.title).font(.system(size: 12)).foregroundStyle(secondary).lineLimit(1)
-                backgroundProgress.opacity(chrome.visible ? 1 : 0)
+                // распознавание и перевод в фоне — одной строкой, чтобы название не уезжало вверх
+                HStack(spacing: 12) { backgroundProgress; translationProgress }.opacity(chrome.visible ? 1 : 0)
             }
             .frame(maxWidth: 520).frame(height: TrafficLights.barHeight)
             HStack {
@@ -169,7 +178,8 @@ struct ReaderView: View {
         .onAppear { TourCenter.shared.startIfNeeded(.book) }
         // пока идёт тур, панель не прячется — стрелкам есть на что указывать
         .onReceive(TourCenter.shared.$part) { p in pinChrome(p == .book) }
-        .onChange(of: showTOC || showNotes || showAppearance || showSearch || showCustomize) { _, open in chrome.pinned = open }
+        .onChange(of: showTOC || showNotes || showAppearance || showSearch || showCustomize || showTranslation) { _, open in chrome.pinned = open }
+        .modifier(TranslationDownloader(translator: translator))
     }
 
     // MARK: - панель в строке заголовка
@@ -190,6 +200,8 @@ struct ReaderView: View {
                     showOriginal.toggle()
                 }
                 .tourAnchor("book.original")
+                barButton("translate", help: "Перевод", selected: translator.showing) { showTranslation.toggle() }
+                    .popover(isPresented: $showTranslation, arrowEdge: .bottom) { TranslationPanel(translator: translator) }
                 // страницы разворота: показывать сканом / распознать снова (сохраняется в meta.json)
                 Menu {
                     ForEach(Array(Set(visible.map(\.page))).sorted(), id: \.self) { i in
@@ -291,6 +303,19 @@ struct ReaderView: View {
             }
             .font(.system(size: 10)).foregroundStyle(ink.opacity(0.4))
             .help("Страницы распознаются в фоне, когда вы не листаете; результат сохраняется рядом с книгой")
+        }
+    }
+
+    /// «Переведено 40 из 340» — фоновый перевод всей книги.
+    @ViewBuilder
+    private var translationProgress: some View {
+        if translator.wholeBook {
+            HStack(spacing: 4) {
+                Image(systemName: translator.bookPause == nil ? "translate" : "pause.circle")
+                Text(translator.progressText + (translator.bookPause.map { " · \($0)" } ?? ""))
+            }
+            .font(.system(size: 10)).foregroundStyle(ink.opacity(0.4))
+            .help("Книга переводится в фоне; перевод сохраняется рядом с книгой")
         }
     }
 
@@ -398,7 +423,7 @@ struct ReaderView: View {
     }
 
     private func pinChrome(_ tour: Bool) {
-        chrome.pinned = tour || showTOC || showNotes || showAppearance || showSearch
+        chrome.pinned = tour || showTOC || showNotes || showAppearance || showSearch || showTranslation
     }
 
     /// Реакции на изменение настроек — отдельно, чтобы цепочка модификаторов не душила проверку типов.
@@ -455,6 +480,7 @@ struct ReaderView: View {
         var pages: [Int] = []
         for p in visible where !pages.contains(p.page) { pages.append(p.page) }
         book.prefetch(visible: pages)
+        translator.setVisible(pages)
     }
 }
 

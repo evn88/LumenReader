@@ -10,6 +10,8 @@ struct PageView: View {
     let theme: ReaderTheme
     var settings = ReflowSettings()
     let showOriginal: Bool
+    /// Перевод книги: при включённом показе страница рисуется переведённой.
+    @ObservedObject var translator: Translator
 
     @State private var loupe: TextLine?
     @State private var hoverPoint: CGPoint = .zero
@@ -74,10 +76,20 @@ struct PageView: View {
         let size = page.layout.size
         let asScan = book.showsScan(index) || page.scanOnly
         let original = showOriginal || asScan
-        let reflowed = settings.reflows && !asScan
-        let screen = reflowed ? book.screens(index, theme: theme, settings: settings).flatMap { $0.indices.contains(sub) ? $0[sub] : $0.last } : nil
-        // слова для выделения: в точной раскладке (и на скане) — по исходным рамкам, в перекомпоновке — из экранной страницы
-        let words: WordGeometry? = page.scanOnly ? nil : (screen.map { WordGeometry(screen: $0, layout: page.layout) } ?? WordGeometry(layout: page.layout))
+        // перевод: та же страница, свёрстанная переведённым текстом (оригинал скана — по кнопке «Оригинал»)
+        let wantsTranslation = translator.showing && !asScan && !page.scanOnly
+        let translated = wantsTranslation
+            ? translator.screens(index, page: page, palette: book.palette, theme: theme, settings: settings,
+                                 screens: book.screenCount(index, settings: settings) ?? 1)
+            : nil
+        let reflowed = (settings.reflows || translated != nil) && !asScan
+        let screen: ScreenPage? = translated.map { t in t.1.indices.contains(sub) ? t.1[sub] : t.1.last! }
+            ?? (reflowed ? book.screens(index, theme: theme, settings: settings).flatMap { $0.indices.contains(sub) ? $0[sub] : $0.last } : nil)
+        let drawn = translated?.0 ?? page
+        // слова для выделения: в точной раскладке (и на скане) — по исходным рамкам, в перекомпоновке — из экранной страницы;
+        // на переводе выделения и хайлайты не показываем — они привязаны к словам оригинала
+        let words: WordGeometry? = page.scanOnly || translated != nil ? nil
+            : (screen.map { WordGeometry(screen: $0, layout: page.layout) } ?? WordGeometry(layout: page.layout))
         let notes = book.annotations.items(page: index)
         return GeometryReader { geo in
             let s = geo.size.width / size.width
@@ -86,7 +98,7 @@ struct PageView: View {
                     ctx.withCGContext { cg in
                         cg.scaleBy(x: s, y: s)
                         let r = PageRenderer(palette: book.palette, theme: theme)
-                        if let screen { r.draw(screen, of: page, in: cg) } else { r.draw(page, in: cg) }
+                        if let screen { r.draw(screen, of: drawn, in: cg) } else { r.draw(page, in: cg) }
                     }
                 }
                 .opacity(original ? 0 : 1)
@@ -134,6 +146,10 @@ struct PageView: View {
                 }
 
                 if let line = loupe, !original, !reflowed, !asScan { loupeView(page, line, scale: s, pageWidth: geo.size.width) }
+
+                if wantsTranslation, translated == nil, !original {
+                    TranslationBadge(translator: translator, index: index, theme: theme)
+                }
             }
             .contentShape(Rectangle())
             // выделение мышью: от слова до слова; отпустили — меню как в Books
@@ -177,6 +193,11 @@ struct PageView: View {
                     Button("Скопировать код (\(block.language.title))") { copy(block.text) }
                 }
                 if !asScan { Button("Скопировать текст страницы") { copy(page.layout.plainText) } }
+                if let t = translator.translation(index), !asScan {
+                    Button("Скопировать перевод страницы") {
+                        copy(zip(PageText.units(page.layout), t).map { $1 ?? $0 }.joined(separator: "\n\n"))
+                    }
+                }
                 Divider()
                 Toggle("Улучшать скан", isOn: Binding(get: { book.wantsEnhancedScan(index) },
                                                       set: { book.setScanEnhance(index, $0) }))
@@ -220,7 +241,8 @@ struct PageView: View {
             onDelete: {
                 if let existing { book.annotations.delete(existing.id) }
                 menuShown = false; selection = nil
-            })
+            },
+            translateTo: translator.target)
     }
 
     private func copy(_ text: String) {

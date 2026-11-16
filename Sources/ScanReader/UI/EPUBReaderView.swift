@@ -57,7 +57,7 @@ struct EPUBStyle: Equatable {
 }
 
 /// Скрипт в каждой главе: разбивка на страницы колонками, переход, подсветка кода, поиск.
-private let epubScript = """
+let epubScript = """
 window.SR = {
   cols: 1, mh: 40,
   apply(css, cols, lang, mh) {
@@ -109,6 +109,22 @@ window.SR = {
     }
   },
   post(m) { try { window.webkit.messageHandlers.sr.postMessage(m); } catch (e) {} },
+  // --- перевод: листовые блоки текста главы ---
+  leafSel: 'p,h1,h2,h3,h4,h5,h6,li,blockquote,figcaption,dt,dd,td,th,caption',
+  leaves() { const q = this.leafSel; return Array.from(document.body.querySelectorAll(q))
+    .filter(e => !e.querySelector(q) && !e.closest('pre') && e.textContent.trim().length > 0); },
+  blocks() { return this.leaves().map(e => e.textContent.replace(/\\s+/g, ' ').trim()); },
+  translate(list) {
+    this.unpaint();
+    this.leaves().forEach((e, i) => { const t = list[i]; if (t === null || t === undefined) return;
+      if (e.dataset.srOrig === undefined) e.dataset.srOrig = e.innerHTML; e.textContent = t; });
+    return this.count();
+  },
+  untranslate() {
+    document.querySelectorAll('[data-sr-orig]').forEach(e => { e.innerHTML = e.dataset.srOrig; delete e.dataset.srOrig; });
+    return this.count();
+  },
+  translated() { return document.querySelector('[data-sr-orig]') !== null; },
   find(q) {
     window.getSelection().removeAllRanges();
     if (!window.find(q, false, false, true)) return -1;
@@ -229,7 +245,43 @@ final class EPUBController: NSObject, ObservableObject, WKNavigationDelegate {
     // MARK: - хайлайты
 
     /// Нарисовать хайлайты текущей главы (после загрузки главы и при каждом изменении).
+    /// Переводчик книги (выставляет окно книги): при показе перевода главы подменяются переводом.
+    weak var translator: EPUBTranslator? {
+        didSet {
+            translator?.currentChapter = { [weak self] in self?.pos.chapter ?? 0 }
+            translator?.currentBlocks = { [weak self] in
+                ((try? await self?.web.evaluateJavaScript("SR.blocks()")) as? [String])
+            }
+            translator?.apply = { [weak self] ch, units in self?.applyTranslation(ch, units) }
+        }
+    }
+
+    /// Подменить текст главы переводом (nil — вернуть оригинал), сохранив место чтения.
+    func applyTranslation(_ chapter: Int, _ units: [String?]?) {
+        guard chapter == pos.chapter else { return }
+        let fraction = chapterPages > 1 ? Double(pos.page) / Double(chapterPages) : 0
+        let js: String
+        if let units {
+            guard let data = try? JSONSerialization.data(withJSONObject: units.map { $0 as Any? ?? NSNull() }),
+                  let json = String(data: data, encoding: .utf8) else { return }
+            js = "SR.translate(\(json))"
+        } else {
+            js = "SR.translated() ? SR.untranslate() : -1"
+        }
+        web.evaluateJavaScript(js) { [weak self] r, _ in
+            guard let self, let n = r as? Int else { return }
+            if n < 0 { return }                         // перевода и не было
+            if units == nil { self.paintHighlights() }
+            self.chapterPages = n
+            self.counts[self.pos.chapter] = n
+            self.show(min(n - 1, Int((fraction * Double(n)).rounded())))
+            self.nextSnap = nil; self.prevSnap = nil
+        }
+    }
+
     func paintHighlights() {
+        // хайлайты привязаны к тексту оригинала — на переводе их не рисуем
+        if translator?.showing == true { return }
         let list = annotations.items(chapter: chapterPath).compactMap { a -> [String: Any]? in
             guard case .epub(_, let s, let e) = a.anchor else { return nil }
             return ["id": a.id.uuidString, "s": s, "e": e, "style": a.style.rawValue, "note": a.note ?? ""]
@@ -375,6 +427,13 @@ final class EPUBController: NSObject, ObservableObject, WKNavigationDelegate {
                 open(book.spine[p.chapter], in: peek)
             }
             _ = try? await peek.evaluateJavaScript(style.js)
+            // соседний разворот — тоже переведённым, если перевод главы уже есть
+            if let tr = translator, tr.showing, let blocks = (try? await peek.evaluateJavaScript("SR.blocks()")) as? [String],
+               let units = tr.cached(p.chapter, blocks: blocks),
+               let data = try? JSONSerialization.data(withJSONObject: units.map { $0 as Any? ?? NSNull() }),
+               let json = String(data: data, encoding: .utf8) {
+                _ = try? await peek.evaluateJavaScript("SR.translate(\(json))")
+            }
             peekChapter = p.chapter; peekStyleJS = style.js
         }
         let count = (try? await peek.evaluateJavaScript("SR.count()")) as? Int ?? 1
@@ -455,6 +514,7 @@ final class EPUBController: NSObject, ObservableObject, WKNavigationDelegate {
                 self.chapterPages = n
                 self.counts[self.pos.chapter] = n
                 self.paintHighlights()
+                if self.translator?.showing == true { self.translator?.refreshCurrent() }
                 if let o = self.pendingOffset {
                     self.pendingOffset = nil
                     webView.evaluateJavaScript("SR.pageOfOffset(\(o))") { r, _ in self.show((r as? Int) ?? 0) }
@@ -584,6 +644,15 @@ private struct EPUBReaderContent: View {
     @State private var restored = false
     @StateObject private var turner = PageTurner()
     @StateObject private var chrome = ChromeVisibility()
+    @StateObject private var translator: EPUBTranslator
+    @State private var showTranslation = false
+
+    init(url: URL, c: EPUBController) {
+        self.url = url
+        self.c = c
+        _translator = StateObject(wrappedValue: EPUBTranslator(book: c.book,
+                                                               target: UserDefaults.standard.string(forKey: "translateTarget") ?? "ru"))
+    }
 
     private var theme: ReaderTheme {
         let t = ReaderTheme.named(themeName)
@@ -683,8 +752,21 @@ private struct EPUBReaderContent: View {
             .overlay(SwipeCatcher(onDelta: { turner.drag($0, fade: c.snapshot($0 < 0 ? 1 : -1) == nil) },
                                   onEnd: { v in turner.endDrag(velocity: v, neighbors: { c.snapshot($0) }) { $0 > 0 ? c.next() : c.prev() } })
                 .allowsHitTesting(false))
-            Text(c.book.title).font(.system(size: 12)).foregroundStyle(secondary).lineLimit(1)
-                .frame(maxWidth: 520).frame(height: TrafficLights.barHeight)
+            VStack(spacing: 1) {
+                Text(c.book.title).font(.system(size: 12)).foregroundStyle(secondary).lineLimit(1)
+                if translator.wholeBook {
+                    HStack(spacing: 4) {
+                        Image(systemName: translator.bookPause == nil ? "translate" : "pause.circle")
+                        Text(translator.progressLine)
+                    }
+                    .font(.system(size: 10)).foregroundStyle(ink.opacity(0.4))
+                    .opacity(chrome.visible ? 1 : 0)
+                }
+            }
+            .frame(maxWidth: 520).frame(height: TrafficLights.barHeight)
+            if translator.showing, translator.working || translator.problem != nil {
+                epubTranslationBadge.frame(maxHeight: .infinity, alignment: .bottom).padding(.bottom, 40)
+            }
             HStack {
                 nav("chevron.left", key: .leftArrow) { turner.turn(-1) { c.prev() } }
                 Spacer()
@@ -717,8 +799,9 @@ private struct EPUBReaderContent: View {
         .onChange(of: c.pos) { save() }
         .onDisappear { c.close() }
         .onChange(of: bookmarks) { let b = bookmarks; Sidecar.update(url) { $0.bookmarks = b } }
-        .onChange(of: showTOC || showNotes || showAppearance || showSearch || showCustomize) { _, open in chrome.pinned = open }
-        .onAppear { chrome.scheduleHide(after: 3) }
+        .onChange(of: showTOC || showNotes || showAppearance || showSearch || showCustomize || showTranslation) { _, open in chrome.pinned = open }
+        .onAppear { chrome.scheduleHide(after: 3); c.translator = translator }
+        .modifier(TranslationDownloader(translator: translator))
         .sheet(isPresented: $showCustomize) { CustomizeSheet() }
         .tourOverlay(.book)
         .onAppear { TourCenter.shared.startIfNeeded(.book) }
@@ -753,6 +836,8 @@ private struct EPUBReaderContent: View {
                 bar("note.text", "Заметки и закладки") { showNotes.toggle() }
                     .tourAnchor("book.notes")
                     .popover(isPresented: $showNotes, arrowEdge: .bottom) { notes }
+                bar("translate", "Перевод", selected: translator.showing) { showTranslation.toggle() }
+                    .popover(isPresented: $showTranslation, arrowEdge: .bottom) { TranslationPanel(translator: translator) }
             }
             .padding(.horizontal, 4).padding(.vertical, 3).modifier(GlassCapsule())
             Spacer(minLength: 12)
@@ -791,11 +876,36 @@ private struct EPUBReaderContent: View {
         .padding(.horizontal, 12).frame(height: 52)
     }
 
-    private func bar(_ symbol: String, _ help: String, action: @escaping () -> Void) -> some View {
+    private func bar(_ symbol: String, _ help: String, selected: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 15)).frame(width: 36, height: 30).contentShape(Rectangle())
+            Image(systemName: symbol).font(.system(size: 15)).frame(width: 36, height: 30)
+                .background(Capsule().fill(selected ? ink.opacity(0.16) : .clear))
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain).focusEffectDisabled().foregroundStyle(ink).help(help).accessibilityLabel(help)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    /// Плашка внизу страницы: глава переводится или перевод не получился.
+    private var epubTranslationBadge: some View {
+        HStack(spacing: 8) {
+            if let p = translator.problem {
+                Image(systemName: "exclamationmark.triangle")
+                Text(p.localizedDescription).lineLimit(2)
+                if case .needsDownload = p {
+                    Button("Скачать") { translator.requestDownload() }.controlSize(.small)
+                } else {
+                    Button("Повторить") { translator.retry() }.controlSize(.small)
+                }
+            } else {
+                ProgressView().controlSize(.mini)
+                Text("Перевожу главу…")
+            }
+        }
+        .font(.system(size: 11)).foregroundStyle(secondary)
+        .padding(.horizontal, 12).padding(.vertical, 6)
+        .glassEffect(.regular, in: .capsule)
+        .frame(maxWidth: 460)
     }
 
     private func nav(_ symbol: String, key: KeyEquivalent, action: @escaping () -> Void) -> some View {
@@ -833,7 +943,9 @@ private struct EPUBReaderContent: View {
                 c.annotations.upsert(a); c.clearSelection()
             },
             onCopy: { Pasteboard.copy(sel.text); c.clearSelection() },
-            onDelete: { if let existing { c.annotations.delete(existing.id) }; c.clearSelection() })
+            onDelete: { if let existing { c.annotations.delete(existing.id) }; c.clearSelection() },
+            translateTo: translator.target,
+            allowsAnnotations: !translator.showing)
     }
 
     private func chapterTitle(_ path: String) -> String {

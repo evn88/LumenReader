@@ -38,6 +38,13 @@ struct ScanReaderApp: App {
             let ahead = args.count > i + 2 ? Int(args[i + 2]) ?? 1 : 1
             exit(MainActor.assumeIsolated { BackgroundCLI.run(book: args[i + 1], lookahead: ahead) })
         }
+        //   ScanReader --translate <книга> <страница с 1> [язык] [вывод.png] — перевод страницы (печать абзацев
+        //   и, если задан вывод, рендер переведённой страницы)
+        if let i = args.firstIndex(of: "--translate"), args.count > i + 2 {
+            exit(TranslateCLI.run(book: args[i + 1], page: (Int(args[i + 2]) ?? 1) - 1,
+                                  target: args.count > i + 3 ? args[i + 3] : "ru",
+                                  output: args.count > i + 4 ? args[i + 4] : nil))
+        }
         //   ScanReader --import-apple-books --dry-run          — что будет импортировано (только числа)
         //   ScanReader --import-apple-books --to <папка>       — копирование своих PDF/EPUB
         if args.contains("--import-apple-books") {
@@ -230,6 +237,70 @@ enum BackgroundCLI {
         }
         print("\(t())  итог: \(book.cached.count) из \(book.count) в кеше")
         return book.cached.count == book.count ? 0 : 2
+    }
+}
+
+enum TranslateCLI {
+    static func run(book: String, page i: Int, target: String, output: String?) -> Int32 {
+        let url = URL(fileURLWithPath: book)
+        guard let loaded = PageSource.load(url), loaded.pages.indices.contains(i) else { print("Не удалось открыть \(book)"); return 1 }
+        let languages = ["ru-RU", "en-US"]
+        let cache = LayoutCache(bookURL: url, palette: .original, languages: languages)
+        // раскладка из кеша рядом с книгой; нет — распознаём
+        let layout0: PageLayout
+        // для проверки годится и раскладка старой версии анализа (другая папка layouts-*)
+        let side = Sidecar.dir(for: url)
+        let old = ((try? FileManager.default.contentsOfDirectory(atPath: side.path)) ?? []).filter { $0.hasPrefix("layouts-") }
+            .compactMap { SyncedFile.read(side.appendingPathComponent("\($0)/page-\(i).json")) }
+            .compactMap { try? JSONDecoder().decode(PageLayout.self, from: $0) }.first
+        if let l = cache.load(i) ?? old { layout0 = l } else {
+            guard let r = try? LayoutCache.process(loaded.pages[i], index: i, cache: cache,
+                                                   analyzer: LayoutAnalyzer(palette: .original, languages: languages)) else {
+                print("Страница не распознана"); return 1
+            }
+            layout0 = r.page.layout
+        }
+        let units = PageText.units(layout0)
+        var finished = false
+        var result: Result<[String?], Error> = .failure(CancellationError())
+        let t0 = Date()
+        Task.detached {
+            do { result = .success(try await TranslationRouter.translate(units, to: target)) } catch { result = .failure(error) }
+            finished = true
+        }
+        // переводчик системы работает через главную очередь — крутим её, а не ждём семафор
+        while !finished { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        let tr: [String?]
+        switch result {
+        case .failure(let e): print("Ошибка: \(e.localizedDescription)"); return 2
+        case .success(let t): tr = t
+        }
+        print(String(format: "Перевод за %.1f с, абзацев %d", Date().timeIntervalSince(t0), units.count))
+        for (u, t) in zip(units, tr) { print("— \(u)\n→ \(t ?? "(без перевода)")\n") }
+        guard let output else { return 0 }
+        let layout = PageText.translatedLayout(layout0, tr)
+        let theme = ReaderTheme.named("sepia")
+        var settings = ReflowSettings(scale: 1.0001)
+        var screens = Reflow.paginate(layout, palette: .original, ink: theme.ink, isDark: false, settings: settings)
+        while screens.count > 1, settings.scale > 0.6 {
+            settings.scale -= 0.04
+            screens = Reflow.paginate(layout, palette: .original, ink: theme.ink, isDark: false, settings: settings)
+        }
+        let w = Int(layout.size.width), h = Int(layout.size.height)
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return 1 }
+        ctx.translateBy(x: 0, y: CGFloat(h)); ctx.scaleBy(x: 1, y: -1)
+        ctx.setFillColor(theme.paper); ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        var page = AnalyzedPage(scanOnly: ctx.makeImage()!)
+        page.scanOnly = false
+        page.layout = layout
+        page.figureImages = layout.figures.map { _ in nil }
+        PageRenderer(palette: .original, theme: theme).draw(screens[0], of: page, in: ctx)
+        guard let img = ctx.makeImage(),
+              let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: output) as CFURL, UTType.png.identifier as CFString, 1, nil) else { return 1 }
+        CGImageDestinationAddImage(dest, img, nil); CGImageDestinationFinalize(dest)
+        print(String(format: "Рендер: %@ (масштаб %.0f%%, экранов %d)", output, settings.scale * 100, screens.count))
+        return 0
     }
 }
 
