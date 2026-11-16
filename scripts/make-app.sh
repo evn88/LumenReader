@@ -14,25 +14,17 @@ trap 'rm -rf "$WORK"' EXIT
 
 swift build -c release
 
-# иконка: PNG 1024 → iconset → icns
-swiftc -O scripts/make-icon.swift -o "$WORK/make-icon"
-"$WORK/make-icon" "$WORK/icon-1024.png"
-ICONSET="$WORK/AppIcon.iconset"
-mkdir -p "$ICONSET"
-for s in 16 32 128 256 512; do
-  sips -z $s $s "$WORK/icon-1024.png" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
-  sips -z $((s*2)) $((s*2)) "$WORK/icon-1024.png" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
-done
-iconutil -c icns "$ICONSET" -o "$WORK/AppIcon.icns"
-
 mkdir -p "$(dirname "$APP")"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/ScanReader "$APP/Contents/MacOS/$PRODUCT_NAME"
-cp "$WORK/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
-# фирменный акцент (AccentColor): выделение в списках, кнопки, переключатели — янтарь вместо синего
-xcrun actool Resources/Assets.xcassets --compile "$APP/Contents/Resources" --platform macosx \
-  --minimum-deployment-target 26.0 --output-partial-info-plist "$WORK/assets.plist" >/dev/null
+# Иконка — Resources/AppIcon.icon (Icon Composer, слои Liquid Glass; слои генерирует scripts/make-icon.swift).
+# actool кладёт её в Assets.car (CFBundleIconName, светлая/тёмная/прозрачная/тонированная) и
+# дополнительно собирает AppIcon.icns (CFBundleIconFile) для мест, где нужен плоский .icns.
+# Там же — фирменный акцент (AccentColor): выделение в списках, кнопки, переключатели — янтарь вместо синего.
+xcrun actool Resources/Assets.xcassets Resources/AppIcon.icon --compile "$APP/Contents/Resources" \
+  --platform macosx --minimum-deployment-target 26.0 --app-icon AppIcon \
+  --output-partial-info-plist "$WORK/assets.plist" >/dev/null
 # Sparkle (автообновление) — во Frameworks, как в PangoZip
 mkdir -p "$APP/Contents/Frameworks"
 ditto .build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework \
@@ -48,6 +40,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleDisplayName</key><string>$PRODUCT_NAME</string>
   <key>CFBundleExecutable</key><string>$PRODUCT_NAME</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundleIconName</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>${BUILD_NUMBER:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}</string>
