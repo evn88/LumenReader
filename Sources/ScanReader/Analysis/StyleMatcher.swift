@@ -34,7 +34,7 @@ struct StyleMatcher {
         return w > 0 ? 100 * inkWidth / w : 0
     }
 
-    private func shapeScore(_ word: Word, _ line: TextLine, family: FontFamily, italic: Bool) -> Double {
+    func shapeScore(_ word: Word, _ line: TextLine, family: FontFamily, italic: Bool) -> Double {
         let size = fitSize(word.text, family: family, bold: false, italic: italic, inkWidth: word.bounds.width)
         guard size > 2 else { return 0 }
         let rect = CGRect(x: word.bounds.minX, y: line.bounds.minY, width: word.bounds.width, height: line.bounds.height)
@@ -148,5 +148,29 @@ struct StyleMatcher {
                 if italic * 10 >= total * 6 { lines[li].words[wi].italic = true }
             }
         }
+    }
+
+    /// Слова строки, которые набором не воспроизвести: краска скана мало похожа на набранное слово
+    /// (формула, греческие буквы с индексами, стрелки над буквами — распознавание выдаёт вместо них «й», «а»).
+    /// Однобуквенные слова русского и английского (переменные «x», «c» в тексте — тоже, их не трогаем).
+    static let singleLetterWords: Set<String> = ["а", "в", "и", "к", "о", "с", "у", "я", "a", "i", "x", "y", "z", "c", "n", "k", "t"]
+
+    func imageWords(_ line: TextLine, family: FontFamily) -> [Int] {
+        var out: [Int] = []
+        for (i, w) in line.words.enumerated() {
+            let core = w.text.trimmingCharacters(in: .punctuationCharacters)
+            guard !core.isEmpty, w.bounds.width > 2 else { continue }
+            let score = shapeScore(w, line, family: family, italic: w.italic)
+            let alt = shapeScore(w, line, family: family, italic: !w.italic)
+            let best = max(score, alt)
+            if ProcessInfo.processInfo.environment["SR_DEBUG_WORDS"] != nil { print(String(format: "%.2f", best), w.text) }
+            // обычные слова совпадают с набором на 0.5–0.8; формулы и мусор — ниже 0.3
+            let limit = core.count <= 3 ? 0.3 : 0.3
+            // одиночная буква, которая сама по себе не слово («й», «Ы»), или «звёздочки» — обрывки формулы
+            let letters = core.filter(\.isLetter)
+            let loneLetter = core.count == 1 && letters.count == 1 && !Self.singleLetterWords.contains(core.lowercased())
+            if best < limit || loneLetter || w.text.contains("*") { out.append(i) }
+        }
+        return out
     }
 }

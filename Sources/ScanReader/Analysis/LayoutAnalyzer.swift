@@ -12,6 +12,8 @@ struct AnalyzedPage {
     var fallbackLines: [Int: CGImage]
     /// Фрагменты скана на месте структуры, которую не удалось воссоздать (по индексам layout.scanRegions).
     var scanImages: [CGImage?] = []
+    /// Слова, показываемые фрагментом скана (формулы в строке), по сквозному номеру слова.
+    var wordImages: [Int: CGImage] = [:]
 
     static let minConfidence: Float = 0.35
     /// Страница без распознавания: показывается сканом (выбор читателя).
@@ -54,6 +56,15 @@ struct AnalyzedPage {
         }
         fallbackLines = fb
         scanImages = layout.scanRegions.map { gray.leveledImage(rect: $0.rect) }
+        // слова-картинки (формулы в строке) — по сквозному номеру слова в порядке allLines
+        var gid = 0, words: [Int: CGImage] = [:]
+        for line in layout.allLines {
+            for w in line.words {
+                if w.asImage == true, let img = gray.leveledImage(rect: line.imageRect(w)) { words[gid] = img }
+                gid += 1
+            }
+        }
+        wordImages = words
     }
 }
 
@@ -311,6 +322,14 @@ struct LayoutAnalyzer {
             } else { merged.append(r) }
         }
         scans = merged
+        // фрагмент не обрезает формулу: дотягиваем до нераспознанной краски рядом (индексы под знаком суммы)
+        for k in scans.indices {
+            for _ in 0..<2 {
+                let probe = scans[k].rect.insetBy(dx: -typical * 0.3, dy: -typical * 0.6)
+                if let more = rest.inkBounds(in: probe) { scans[k].rect = scans[k].rect.union(more.insetBy(dx: -3, dy: -3)) }
+            }
+            scans[k].rect = scans[k].rect.intersection(CGRect(x: 0, y: 0, width: W, height: H))
+        }
         // строки, оказавшиеся внутри фрагмента скана, — его часть (иначе текст рисуется поверх картинки)
         lines.removeAll { l in
             let c = CGPoint(x: l.bounds.midX, y: l.bounds.midY)
@@ -322,6 +341,14 @@ struct LayoutAnalyzer {
             styled.append(Paragraph(family: family, fontSize: size, lines: group))
         }
         Headings.refine(&styled, pageWidth: W)
+        // формулы и символы внутри строки — фрагментами скана на месте слов
+        for pi in styled.indices where !CodeDetector.isCode(styled[pi]) {
+            for li in styled[pi].lines.indices {
+                for wi in matcher.imageWords(styled[pi].lines[li], family: styled[pi].family) {
+                    styled[pi].lines[li].words[wi].asImage = true
+                }
+            }
+        }
         let bodySize = Headings.bodySize(styled)
         // гарнитура основного текста — по числу строк
         let bodyFamily = Dictionary(grouping: styled, by: \.family).max { a, b in

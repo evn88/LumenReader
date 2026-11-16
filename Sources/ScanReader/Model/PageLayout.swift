@@ -217,6 +217,18 @@ struct TextLine: Codable, Equatable {
     var text: String { words.map(\.text).joined(separator: " ") }
 }
 
+extension TextLine {
+    /// Фрагмент скана для слова-картинки: по ширине — слово, по высоте — вся строка (индексы, стрелки над буквами).
+    func imageRect(_ w: Word) -> CGRect {
+        CGRect(x: w.bounds.minX - 3, y: bounds.minY - 2, width: w.bounds.width + 6, height: bounds.height + 4)
+    }
+
+    /// Масштаб слова-картинки при перекомпоновке: как у текста, но не выше ~двух строк (знак суммы с пределами).
+    func imageScale(_ w: Word, _ k: CGFloat) -> CGFloat {
+        k * min(1, xHeight * 4.5 / max(imageRect(w).height, 1))
+    }
+}
+
 struct Word: Codable, Equatable {
     var text: String
     /// Рамка по краске.
@@ -226,8 +238,11 @@ struct Word: Codable, Equatable {
     /// Порядковый номер слова на странице (в порядке allLines) — сквозной якорь выделений и хайлайтов.
     /// Проставляется при перекомпоновке, в кеш не пишется.
     var gid: Int? = nil
+    /// Слово не похоже на распознанный текст (формула в строке, символы, которых нет в шрифте):
+    /// показываем фрагментом скана на его месте.
+    var asImage: Bool? = nil
 
-    enum CodingKeys: String, CodingKey { case text, bounds, bold, italic }
+    enum CodingKeys: String, CodingKey { case text, bounds, bold, italic, asImage }
 }
 
 enum FontFamily: String, Codable, CaseIterable {

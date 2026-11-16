@@ -35,6 +35,8 @@ struct ScreenPage {
         case leader(from: CGFloat, to: CGFloat, baseline: CGFloat, family: FontFamily, size: CGFloat, grid: CGFloat)
         /// Фрагмент скана на месте структуры, которую не удалось воссоздать (индекс layout.scanRegions).
         case scan(index: Int, rect: CGRect)
+        /// Слово-картинка (формула в строке) по сквозному номеру слова.
+        case wordImage(gid: Int, rect: CGRect)
     }
     var items: [Item] = []
     /// Текст каждой строки перекомпоновки (копирование, поиск, тесты).
@@ -60,6 +62,13 @@ enum Reflow {
     ///   - carryOut: начало следующей страницы, если последнее слово этой оборвано переносом.
     static func paginate(_ layout: PageLayout, palette: FontPalette, ink: CGColor, isDark: Bool,
                          settings: ReflowSettings, carryIn: Bool = false, carryOut: String? = nil) -> [ScreenPage] {
+        // слова-картинки: рамка фрагмента и базовая линия строки — по сквозному номеру слова
+        var imageWords: [Int: (CGRect, CGFloat, CGFloat)] = [:]
+        do {
+            var numbered = layout
+            numbered.numberWords()
+            for l in numbered.allLines { for w in l.words where w.asImage == true { if let g = w.gid { imageWords[g] = (l.imageRect(w), l.baseline, l.imageScale(w, settings.scale)) } } }
+        }
         // строки оглавлений и таблиц идут в allLines после строк абзацев исходной раскладки
         let structureLineStart = layout.paragraphs.reduce(0) { $0 + $1.lines.count }
         let layout = prepare(layout, carryIn: carryIn, carryOut: carryOut)
@@ -161,6 +170,13 @@ enum Reflow {
                         pages[pages.count - 1].lineTexts.append(t.text)
                         pages[pages.count - 1].wordBoxes += t.words.map { w in
                             (w.0, CGRect(x: colL + t.x + w.1, y: y, width: max(1, w.2 - w.1), height: lh))
+                        }
+                        // слова-картинки: фрагмент скана на месте заглушки
+                        for w in t.words {
+                            guard let src = imageWords[w.0] else { continue }
+                            let k = src.2
+                            add(.wordImage(gid: w.0, rect: CGRect(x: colL + t.x + w.1, y: y + t.baseline - (src.1 - src.0.minY) * k,
+                                                                  width: src.0.width * k, height: src.0.height * k)))
                         }
                         y += lh
                     }
@@ -424,6 +440,8 @@ enum Reflow {
 
     /// Атрибут строки: сквозной номер слова (Word.gid) — для выделений в перекомпоновке.
     static let wordKey = NSAttributedString.Key("sr.word")
+    /// Атрибут: заглушка под слово-картинку.
+    static let imageKey = NSAttributedString.Key("sr.image")
 
     /// Подготовка раскладки к перекомпоновке: сквозные номера слов, склейка абзацев, разорванных
     /// посреди перенесённого слова, и переносы через границу страниц.
@@ -522,6 +540,14 @@ enum Reflow {
                 var attrs: [NSAttributedString.Key: Any] = [
                     fk: palette.font(p.family, bold: w.bold, italic: w.italic, size: size), fg: ink]
                 if let gid = w.gid { attrs[wordKey] = gid }
+                if w.asImage == true, w.gid != nil {
+                    // формула в строке: место под фрагмент скана в масштабе текста
+                    let r = line.imageRect(w), k = line.imageScale(w, settings.scale)
+                    attrs[NSAttributedString.Key(kCTRunDelegateAttributeName as String)] =
+                        ImageRun.delegate(width: r.width * k, ascent: (line.baseline - r.minY) * k, descent: (r.maxY - line.baseline) * k)
+                    attrs[imageKey] = true
+                    text = "\u{FFFC}"
+                }
                 out.append(NSAttributedString(string: text, attributes: attrs))
                 if !(lastWord && (lastLine || joinNext)) {
                     out.append(NSAttributedString(string: " ", attributes: [
@@ -637,5 +663,21 @@ enum Reflow {
         // высота строки фиксирована: базовая линия у всех строк на одном уровне от верха строки
         let base = out.map(\.1).max() ?? 0
         return out.map { ($0.0, base, $0.2, $0.3, $0.4, $0.5) }
+    }
+}
+
+
+/// Заглушка в строке CoreText под картинку заданного размера (CTRunDelegate).
+enum ImageRun {
+    final class Box { let w, a, d: CGFloat; init(_ w: CGFloat, _ a: CGFloat, _ d: CGFloat) { self.w = w; self.a = a; self.d = d } }
+
+    static func delegate(width: CGFloat, ascent: CGFloat, descent: CGFloat) -> CTRunDelegate {
+        var cb = CTRunDelegateCallbacks(
+            version: kCTRunDelegateVersion1,
+            dealloc: { Unmanaged<Box>.fromOpaque($0).release() },
+            getAscent: { Unmanaged<Box>.fromOpaque($0).takeUnretainedValue().a },
+            getDescent: { Unmanaged<Box>.fromOpaque($0).takeUnretainedValue().d },
+            getWidth: { Unmanaged<Box>.fromOpaque($0).takeUnretainedValue().w })
+        return CTRunDelegateCreate(&cb, Unmanaged.passRetained(Box(width, ascent, descent)).toOpaque())!
     }
 }

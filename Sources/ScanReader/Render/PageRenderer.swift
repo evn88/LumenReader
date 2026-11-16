@@ -86,15 +86,16 @@ struct PageRenderer {
         cg.setFillColor(theme.ink)
         for r in layout.rules { cg.fill(r) }
 
-        var lineIndex = 0
+        var lineIndex = 0, gid = 0
         for p in layout.paragraphs {
             for line in p.lines {
                 if let crop = page.fallbackLines[lineIndex] {
                     drawImage(crop, in: line.bounds.insetBy(dx: -3, dy: -3).integral, cg: cg)
                 } else {
-                    draw(line, family: p.family, size: displaySize(p), cg: cg)
+                    draw(line, family: p.family, size: displaySize(p), cg: cg, firstGid: gid, images: page.wordImages)
                 }
                 lineIndex += 1
+                gid += line.words.count
             }
         }
         drawStructure(page, lineIndex: lineIndex, cg: cg)
@@ -194,6 +195,8 @@ struct PageRenderer {
                 if let crop = page.fallbackLines[li] { drawImage(crop, in: rect.integral, cg: cg) }
             case .leader(let a, let b, let baseline, let family, let size, let grid):
                 drawLeader(from: a, to: b, baseline: baseline, family: family, size: size, grid: grid, cg: cg)
+            case .wordImage(let gid, let rect):
+                if let image = page.wordImages[gid] { drawImage(image, in: rect.integral, cg: cg) }
             case .scan(let i, let rect):
                 if page.scanImages.indices.contains(i), let image = page.scanImages[i] { drawImage(image, in: rect.integral, cg: cg) }
             }
@@ -214,12 +217,23 @@ struct PageRenderer {
         return p.fontSize * ref / disp
     }
 
+    private static let invertedCache = NSCache<CGImage, CGImage>()
+
+    static func inverted(_ image: CGImage) -> CGImage {
+        if let c = invertedCache.object(forKey: image) { return c }
+        guard var g = GrayBitmap(cgImage: image) else { return image }
+        for i in g.pixels.indices { g.pixels[i] = 255 - g.pixels[i] }
+        let out = GrayBitmap.makeImage(width: g.width, height: g.height, pixels: g.pixels) ?? image
+        invertedCache.setObject(out, forKey: image)
+        return out
+    }
+
     private func drawImage(_ image: CGImage, in rect: CGRect, cg: CGContext) {
         cg.saveGState()
         cg.translateBy(x: 0, y: rect.minY + rect.maxY)
         cg.scaleBy(x: 1, y: -1)
-        if theme.isDark {
-            // инверсия: белый фон -> чёрный, штрихи -> светлые; затем screen с цветом листа
+        if theme.isDark, image.colorSpace?.model != .monochrome {
+            // цветная иллюстрация: инверсия заливкой difference (цвета сохраняются)
             cg.clip(to: rect)
             cg.draw(image, in: rect)
             cg.setBlendMode(.difference)
@@ -228,6 +242,12 @@ struct PageRenderer {
             cg.setBlendMode(.screen)
             cg.setFillColor(theme.paper)
             cg.fill(rect)
+        } else if theme.isDark {
+            // инвертированная картинка (белый фон -> чёрный, штрихи -> светлые) поверх листа в режиме screen.
+            // Раньше инвертировали заливкой difference по прямоугольнику: на дробных экранных пикселях
+            // края заливки и картинки сглаживались по-разному — вокруг фрагментов была видна рамка.
+            cg.setBlendMode(.screen)
+            cg.draw(Self.inverted(image), in: rect)
         } else {
             cg.setBlendMode(.multiply)
             cg.draw(image, in: rect)
@@ -281,9 +301,16 @@ struct PageRenderer {
     }
 
     @discardableResult
-    private func draw(_ line: TextLine, family: FontFamily, size: CGFloat, cg: CGContext) -> (CGFloat, CGFloat) {
+    private func draw(_ line: TextLine, family: FontFamily, size: CGFloat, cg: CGContext,
+                      firstGid: Int = 0, images: [Int: CGImage] = [:]) -> (CGFloat, CGFloat) {
         let ctLines = line.words.map { TextMetrics.line($0.text, font: font(family, $0, size), color: theme.ink) }
-        let inks = ctLines.map(TextMetrics.inkBounds)
+        // слово-картинка занимает ширину своего фрагмента скана
+        let image: [Int: CGImage] = Dictionary(uniqueKeysWithValues: line.words.indices.compactMap { i in
+            images[firstGid + i].map { (i, $0) } })
+        let inks = ctLines.enumerated().map { i, l -> CGRect in
+            guard image[i] != nil else { return TextMetrics.inkBounds(l) }
+            let r = line.imageRect(line.words[i]); return CGRect(x: 0, y: 0, width: r.width, height: r.height)
+        }
         let space = TextMetrics.advance(TextMetrics.line(" ", font: palette.font(family, bold: false, italic: false, size: size)))
 
         // позиции левого края краски каждого слова
@@ -298,7 +325,9 @@ struct PageRenderer {
             // естественные пробелы: advance слова + пробел
             var x: CGFloat = 0
             var rel: [CGFloat] = []
-            for (l, ink) in zip(ctLines, inks) { rel.append(x + ink.minX); x += TextMetrics.advance(l) + space }
+            for (i, (l, ink)) in zip(ctLines, inks).enumerated() {
+                rel.append(x + ink.minX); x += (image[i] != nil ? ink.width : TextMetrics.advance(l)) + space
+            }
             let natural = (rel.last ?? 0) + (inks.last?.width ?? 0) - (rel.first ?? 0)
             let start: CGFloat
             switch line.alignment {
@@ -310,6 +339,11 @@ struct PageRenderer {
         }
 
         for (i, l) in ctLines.enumerated() {
+            if let img = image[i] {
+                let r = line.imageRect(line.words[i])
+                drawImage(img, in: CGRect(x: xs[i], y: r.minY, width: r.width, height: r.height).integral, cg: cg)
+                continue
+            }
             cg.textPosition = CGPoint(x: xs[i] - inks[i].minX, y: line.baseline)
             CTLineDraw(l, cg)
         }
