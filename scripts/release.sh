@@ -21,11 +21,8 @@ rm -rf "$BUILD_DIR"; mkdir -p "$BUILD_DIR"
 swift test
 VERSION="$VER" BUILD_NUMBER="$(git rev-list --count HEAD)" APP_DIR="$BUILD_DIR" ./scripts/make-app.sh
 
-# DMG с приложением и ссылкой на /Applications
-STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
-ditto "$BUILD_DIR/$PRODUCT_NAME.app" "$STAGE/$PRODUCT_NAME.app"
-ln -s /Applications "$STAGE/Applications"
-hdiutil create -quiet -volname "$PRODUCT_NAME" -srcfolder "$STAGE" -format UDZO -ov "$DMG"
+# DMG как в PangoZip: фон со свечением и стрелкой, иконка тома, раскладка окна Finder
+./scripts/make-dmg.sh "$BUILD_DIR/$PRODUCT_NAME.app" "$DMG"
 shasum -a 256 "$DMG" | sed "s|$BUILD_DIR/||" > "$DMG.sha256"
 
 # Лента обновлений: одна версия, подписи архива и всей ленты

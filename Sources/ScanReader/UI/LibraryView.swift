@@ -162,7 +162,11 @@ struct LibraryView: View {
             .navigationSplitViewColumnWidth(min: 200, ideal: 220)
             .tourAnchor("library.sidebar")
         } detail: {
-            content
+            // запуск не из «Программ» (например, прямо с DMG) — подсказка установки, как в PangoZip
+            VStack(spacing: 0) {
+                InstallBanner()
+                content.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
                 // тёплый фон под всё окно, включая область под прозрачным тулбаром:
                 // сетка уходит под тулбар с системным scroll edge effect, без своей полосы
                 .background(Brand.paper(scheme).ignoresSafeArea())
