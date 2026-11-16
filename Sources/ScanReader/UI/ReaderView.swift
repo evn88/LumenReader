@@ -58,7 +58,11 @@ struct ReaderView: View {
         ReflowSettings(scale: CGFloat(scale), lineSpacing: CGFloat(lineSpacing), margins: CGFloat(margins), justify: justify)
     }
     private var ink: Color { Color(cgColor: theme.ink) }
-    private var secondary: Color { Color(cgColor: theme.secondary) }
+    @Environment(\.colorSchemeContrast) private var contrast
+    /// «Увеличить контраст» в Универсальном доступе — вторичный текст цветом основного.
+    private var secondary: Color { Color(cgColor: contrast == .increased ? theme.ink : theme.secondary) }
+    /// Узкое окно — одна страница, даже если выбран разворот.
+    private var spread: Bool { twoPages && (containerSize.width == 0 || containerSize.width >= 960) }
 
     // MARK: - экранные страницы
 
@@ -78,10 +82,10 @@ struct ReaderView: View {
         // оригинал — это страница скана целиком: листаем по страницам скана, без экранных
         if showOriginal {
             let first = ScreenPos(page: pos.page, sub: 0)
-            return twoPages && pos.page + 1 < book.count ? [first, ScreenPos(page: pos.page + 1, sub: 0)] : [first]
+            return spread && pos.page + 1 < book.count ? [first, ScreenPos(page: pos.page + 1, sub: 0)] : [first]
         }
         let first = ScreenPos(page: pos.page, sub: min(pos.sub, count(pos.page) - 1))
-        if twoPages, let second = advance(first) { return [first, second] }
+        if spread, let second = advance(first) { return [first, second] }
         return [first]
     }
 
@@ -105,6 +109,7 @@ struct ReaderView: View {
                         PageView(book: book, index: p.page, sub: p.sub, theme: theme, settings: settings,
                                  showOriginal: showOriginal)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .tourAnchor(p == visible[0] ? "book.page" : "book.page2")
                         // номер под каждой страницей разворота, как в Books
                         // тот же номер, что в меню/оглавлении/поиске (печатная метка PDF или индекс + 1);
                         // экранные страницы одной страницы скана — «14 · 2»
@@ -133,6 +138,7 @@ struct ReaderView: View {
                 navButton("chevron.left", key: .leftArrow) { turner.turn(-1) { turn(-1) } }.disabled(back(visible[0]) == nil)
                 Spacer()
                 navButton("chevron.right", key: .rightArrow) { turner.turn(1) { turn(1) } }.disabled(advance(visible.last!) == nil)
+                    .tourAnchor("book.next")
             }
             .padding(.horizontal, 8)
             .frame(maxHeight: .infinity)
@@ -168,6 +174,10 @@ struct ReaderView: View {
         .onChange(of: enhanceScans) { book.enhanceScans = enhanceScans }
         .onChange(of: languagesCSV) { book.languages = languagesCSV.split(separator: ",").map(String.init) }
         .sheet(isPresented: $showCustomize) { CustomizeSheet() }
+        .tourOverlay(.book)
+        .onAppear { TourCenter.shared.startIfNeeded(.book) }
+        // пока идёт тур, панель не прячется — стрелкам есть на что указывать
+        .onReceive(TourCenter.shared.$part) { chrome.pinned = $0 == .book || showTOC || showNotes || showAppearance || showSearch }
         .onChange(of: showTOC || showNotes || showAppearance || showSearch || showCustomize) { _, open in chrome.pinned = open }
     }
 
@@ -183,10 +193,12 @@ struct ReaderView: View {
                     twoPages.toggle()
                 }
                 barButton("note.text", help: "Заметки и закладки") { showNotes.toggle() }
+                    .tourAnchor("book.notes")
                     .popover(isPresented: $showNotes, arrowEdge: .bottom) { notesView }
                 barButton("doc.viewfinder", help: "Показать оригинал скана", selected: showOriginal) {
                     showOriginal.toggle()
                 }
+                .tourAnchor("book.original")
                 // страницы разворота: показывать сканом / распознать снова (сохраняется в meta.json)
                 Menu {
                     ForEach(Array(Set(visible.map(\.page))).sorted(), id: \.self) { i in
@@ -209,6 +221,7 @@ struct ReaderView: View {
                 }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                 .foregroundStyle(ink).help("Распознавание страниц разворота")
+                .tourAnchor("book.pagemenu")
             }
             .padding(.horizontal, 4).padding(.vertical, 3)
             .modifier(GlassCapsule())
@@ -227,10 +240,12 @@ struct ReaderView: View {
                 }
                 .buttonStyle(.plain).foregroundStyle(ink)
                 .help("Темы и настройки")
+                .tourAnchor("book.aa")
                 .popover(isPresented: $showAppearance, arrowEdge: .bottom) {
                     AppearancePopover { showAppearance = false; showCustomize = true }
                 }
                 barButton("magnifyingglass", help: "Поиск") { showSearch.toggle() }
+                    .tourAnchor("book.search")
                     .keyboardShortcut("f")
                     .popover(isPresented: $showSearch, arrowEdge: .bottom) { searchView }
             }
@@ -264,6 +279,8 @@ struct ReaderView: View {
         .focusEffectDisabled()
         .foregroundStyle(ink)
         .help(help)
+        .accessibilityLabel(help)
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     /// «Распознано 120 из 340» — фоновая обработка книги в простое (кеш общий для всех устройств).
@@ -370,6 +387,7 @@ struct ReaderView: View {
         }
         .buttonStyle(.plain)
         .keyboardShortcut(key, modifiers: [])
+        .accessibilityLabel(symbol.contains("left") ? "Предыдущая страница" : "Следующая страница")
     }
 
     /// Автомасштаб: какой кегль основного текста скана сейчас на экране (pt) и сколько это физически.
@@ -377,7 +395,7 @@ struct ReaderView: View {
         guard textScaleAuto, let p = visible.first.flatMap({ book.pages[$0.page] }), !p.scanOnly else { return }
         let body = p.layout.paragraphs.max { $0.lines.count < $1.lines.count }
         guard let fontPx = body?.fontSize, containerSize.width > 100 else { return }
-        let n = CGFloat(twoPages ? 2 : 1)
+        let n = CGFloat(spread ? 2 : 1)
         // ширина страницы на экране: колонка разворота, ограниченная высотой по пропорции листа
         let byW = (containerSize.width - 64 * (n - 1)) / n
         let byH = (containerSize.height - 40) * p.layout.size.width / max(1, p.layout.size.height)
@@ -397,7 +415,7 @@ struct ReaderView: View {
 
     private func go(_ dir: Int) {
         if showOriginal {
-            let step = twoPages ? 2 : 1
+            let step = spread ? 2 : 1
             let next = pos.page + dir * step
             if next >= 0, next < book.count { pos = ScreenPos(page: next, sub: 0) }
             else if dir < 0, pos.page > 0 { pos = ScreenPos(page: 0, sub: 0) }
@@ -407,7 +425,7 @@ struct ReaderView: View {
             if let next = advance(visible.last!) { pos = next }
         } else {
             guard var p = back(visible[0]) else { return }
-            if twoPages, let pp = back(p) { p = pp }
+            if spread, let pp = back(p) { p = pp }
             pos = p
         }
     }

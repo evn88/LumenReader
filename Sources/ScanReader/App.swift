@@ -61,14 +61,14 @@ struct ScanReaderApp: App {
     var body: some Scene {
         // при запуске — Библиотека; книги открываются в отдельных окнах читалки, как в Apple Books
         WindowGroup("Библиотека", id: "library") {
-            LibraryRoot().frame(minWidth: 820, minHeight: 540)
+            LibraryRoot().frame(minWidth: 760, minHeight: 520).brandChrome()
         }
         WindowGroup(id: "reader", for: String.self) { $path in
-            ReaderWindow(path: path ?? "").frame(minWidth: 900, minHeight: 620)
+            ReaderWindow(path: path ?? "").frame(minWidth: 720, minHeight: 520).brandChrome()
         }
         .windowStyle(.hiddenTitleBar)      // панель — капсулы в строке заголовка, фон окна = цвет темы
-        Settings { SettingsView() }
-        Window("О программе", id: "about") { AboutView() }
+        Settings { SettingsView().brandChrome() }
+        Window("О программе", id: "about") { AboutView().brandChrome() }
             .windowResizability(.contentSize)
             .commands { AppCommands() }
     }
@@ -264,8 +264,16 @@ struct AppCommands: Commands {
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
+        CommandGroup(after: .help) {
+            Button(TourCenter.russian ? "Ознакомительный тур" : "Welcome Tour") {
+                // в окне книги — тур по книге, иначе — по библиотеке
+                let inBook = NSApp.keyWindow?.identifier?.rawValue.hasPrefix("reader") ?? false
+                TourCenter.shared.restart(in: inBook ? .book : .library)
+            }
+        }
         CommandGroup(replacing: .appInfo) {
             Button("О программе \(Product.name)") { openWindow(id: "about") }
+            Divider()
             if ApplicationUpdater.shared.isConfigured {
                 Button("Проверить обновления…") { ApplicationUpdater.shared.checkForUpdates() }
             }
@@ -274,4 +282,10 @@ struct AppCommands: Commands {
             }
         }
     }
+}
+
+extension View {
+    /// Айдентика и HIG: янтарный акцент вместо системного синего, без системных колец фокуса
+    /// (клавиатурная навигация остаётся; выбранное обозначается своим стилем).
+    func brandChrome() -> some View { tint(Brand.amber).focusEffectDisabled() }
 }

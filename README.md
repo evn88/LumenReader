@@ -11,6 +11,8 @@ Website: [ai-soft.app](https://ai-soft.app) · [Русская версия](REA
 | Scanned page, re-typeset, with highlights | EPUB with highlights |
 |---|---|
 | ![Scan](docs/screenshots/reader-scan.png) | ![EPUB](docs/screenshots/reader-epub.png) |
+| **Welcome tour** | |
+| ![Tour](docs/screenshots/tour.png) | |
 | **Themes & settings** | **Scan enhancement (before / after)** |
 | ![Themes](docs/screenshots/themes.png) | ![Enhance](docs/screenshots/scan-enhance.png) |
 

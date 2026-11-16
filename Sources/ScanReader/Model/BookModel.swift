@@ -101,12 +101,14 @@ enum SyncedFile {
 /// результат распознавания получают все участники, в том числе с другим Apple ID.
 /// Если папка книги недоступна для записи — локально в Application Support.
 struct LayoutCache {
-    static let version = "v3"   // меняем при изменении анализа — старые раскладки пересчитаются
+    static let version = "v4"   // меняем при изменении анализа — старые раскладки пересчитаются
     let dir: URL
 
     init(bookURL: URL, palette: FontPalette, languages: [String]) {
         // ключ не содержит путь: у разных учёток путь к общей папке разный
-        let key = "\(Self.version)|\(palette.serifName)|\(palette.sansName)|\(languages)"
+        // гарнитура — свойство скана: анализ всегда по эталонной паре шрифтов, тема на ключ не влияет
+        _ = palette
+        let key = "\(Self.version)|\(languages)"
         let hash = SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined().prefix(16)
         let fm = FileManager.default
         let sidecar = bookURL.deletingLastPathComponent()
@@ -170,7 +172,8 @@ final class BookModel: ObservableObject {
     let sources: [PageSource]
     @Published private(set) var pages: [Int: AnalyzedPage] = [:]
     @Published private(set) var failed: [Int: String] = [:]
-    @Published var palette: FontPalette { didSet { if palette != oldValue { reset() } } }
+    /// Шрифты отображения. Распознавание от них не зависит — смена только перерисовывает страницы.
+    @Published var palette: FontPalette { didSet { if palette != oldValue { reflowMemo = [:] } } }
     @Published var languages: [String] = ["ru-RU", "en-US"] { didSet { if languages != oldValue { reset() } } }
     /// Улучшать иллюстрации (увеличение, чистые заливки, перенабор надписей).
     @Published var enhanceFigures = true { didSet { if enhanceFigures != oldValue { reset() } } }
@@ -528,7 +531,8 @@ final class BookModel: ObservableObject {
     /// Задача в общей очереди распознавания; для страниц «показывать сканом» — только растр, без OCR.
     private func run(_ i: Int, priority: RecognitionQueue.Priority) async -> Result<AnalyzedPage, Error> {
         let source = sources[i], store = cache
-        let analyzer = LayoutAnalyzer(palette: palette, languages: languages, enhanceFigures: enhanceFigures)
+        // эталонные шрифты (Times/Helvetica) для подбора гарнитуры: шрифты темы её искажали
+        let analyzer = LayoutAnalyzer(palette: .original, languages: languages, enhanceFigures: enhanceFigures)
         let scanOnly = showScan.contains(i) && !cached.contains(i)
         let wantLeveled = showsScan(i)
         return await withCheckedContinuation { (k: CheckedContinuation<Result<AnalyzedPage, Error>, Never>) in

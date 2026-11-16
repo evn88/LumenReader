@@ -23,19 +23,19 @@ struct ReaderTheme: Equatable, Hashable, Identifiable {
                 blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
     }
 
-    // цвета сняты пипеткой с Apple Books (macOS 26/27) и приведены к нашему рендеру
+    // цвета сняты пипеткой с Apple Books (macOS 26/27); вторичный (номера, название) поднят до контраста WCAG AA ≥ 4.5:1
     static let original = ReaderTheme(name: "Оригинал", paper: rgb(0xFFFFFF), ink: rgb(0x000000), isDark: false,
-                                      palette: .original, cardFont: "Helvetica Neue", secondary: rgb(0x8A8A8A))
+                                      palette: .original, cardFont: "Helvetica Neue", secondary: rgb(0x747474))
     static let quiet = ReaderTheme(name: "Тишина", paper: rgb(0x4A4A4C), ink: rgb(0xA9A9A9), isDark: true,
-                                   palette: .books, cardFont: "Iowan Old Style", secondary: rgb(0x8C8C8E))
+                                   palette: .books, cardFont: "Iowan Old Style", secondary: rgb(0xBCBCBD))
     static let paperTheme = ReaderTheme(name: "Бумага", paper: rgb(0xEDEDED), ink: rgb(0x262626), isDark: false,
-                                        palette: .charter, cardFont: "Charter", secondary: rgb(0x8B8B8B))
+                                        palette: .charter, cardFont: "Charter", secondary: rgb(0x696969))
     static let bold = ReaderTheme(name: "Акцент", paper: rgb(0xFFFFFF), ink: rgb(0x000000), isDark: false,
-                                  palette: .sans, cardFont: "Helvetica Neue", cardBold: true, secondary: rgb(0x8A8A8A))
+                                  palette: .sans, cardFont: "Helvetica Neue", cardBold: true, secondary: rgb(0x747474))
     static let calm = ReaderTheme(name: "Покой", paper: rgb(0xEDDEC0), ink: rgb(0x2A2015), isDark: false,
-                                  palette: .books, cardFont: "Iowan Old Style", secondary: rgb(0x807667))
+                                  palette: .books, cardFont: "Iowan Old Style", secondary: rgb(0x6A6052))
     static let focus = ReaderTheme(name: "Фокус", paper: rgb(0xFFFBF2), ink: rgb(0x1E1B16), isDark: false,
-                                   palette: .sans, cardFont: "Helvetica Neue", secondary: rgb(0x8E887C))
+                                   palette: .sans, cardFont: "Helvetica Neue", secondary: rgb(0x787268))
     static let all: [ReaderTheme] = [.original, .quiet, .paperTheme, .bold, .calm, .focus]
 
     // прежние имена (CLI, сохранённые настройки)
@@ -46,7 +46,7 @@ struct ReaderTheme: Equatable, Hashable, Identifiable {
     func darkVariant() -> ReaderTheme {
         guard !isDark else { return self }
         var t = self
-        t.paper = Self.rgb(0x121212); t.ink = Self.rgb(0xB0B0B0); t.secondary = Self.rgb(0x6E6E6E); t.isDark = true
+        t.paper = Self.rgb(0x121212); t.ink = Self.rgb(0xB0B0B0); t.secondary = Self.rgb(0x7F7F7F); t.isDark = true
         return t
     }
 
@@ -92,7 +92,7 @@ struct PageRenderer {
                 if let crop = page.fallbackLines[lineIndex] {
                     drawImage(crop, in: line.bounds.insetBy(dx: -3, dy: -3).integral, cg: cg)
                 } else {
-                    draw(line, family: p.family, size: p.fontSize, cg: cg)
+                    draw(line, family: p.family, size: displaySize(p), cg: cg)
                 }
                 lineIndex += 1
             }
@@ -135,12 +135,26 @@ struct PageRenderer {
                 if let crop = page.fallbackLines[lineStart[pi] + li] {
                     drawImage(crop, in: p.lines[li].bounds.insetBy(dx: -3, dy: -3).integral, cg: cg)
                 } else {
-                    draw(p.lines[li], family: p.family, size: p.fontSize, cg: cg)
+                    draw(p.lines[li], family: p.family, size: displaySize(p), cg: cg)
                 }
             case .fallback(let li, let rect):
                 if let crop = page.fallbackLines[li] { drawImage(crop, in: rect.integral, cg: cg) }
             }
         }
+    }
+
+    /// Кегль абзаца для шрифта темы. Раскладка подобрана эталонной парой (FontPalette.original),
+    /// а шрифт темы может быть шире (Iowan) или уже: подгоняем по ширине слов, чтобы слова не слипались.
+    func displaySize(_ p: Paragraph) -> CGFloat {
+        guard palette != .original else { return p.fontSize }
+        let words = p.lines.flatMap(\.words).prefix(24)
+        var ref: CGFloat = 0, disp: CGFloat = 0
+        for w in words {
+            ref += TextMetrics.inkBounds(TextMetrics.line(w.text, font: FontPalette.original.font(p.family, bold: w.bold, italic: w.italic, size: 100))).width
+            disp += TextMetrics.inkBounds(TextMetrics.line(w.text, font: palette.font(p.family, bold: w.bold, italic: w.italic, size: 100))).width
+        }
+        guard ref > 0, disp > 0 else { return p.fontSize }
+        return p.fontSize * ref / disp
     }
 
     private func drawImage(_ image: CGImage, in rect: CGRect, cg: CGContext) {

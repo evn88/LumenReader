@@ -11,6 +11,8 @@
 | Скан, набранный заново, с хайлайтами | EPUB с хайлайтами |
 |---|---|
 | ![Скан](docs/screenshots/reader-scan.png) | ![EPUB](docs/screenshots/reader-epub.png) |
+| **Ознакомительный тур** | |
+| ![Тур](docs/screenshots/tour.png) | |
 | **Темы и настройки** | **Улучшение скана (до / после)** |
 | ![Темы](docs/screenshots/themes.png) | ![Улучшение](docs/screenshots/scan-enhance.png) |
 

@@ -15,7 +15,9 @@ let package = Package(
             path: "Sources/ScanReader",
             linkerSettings: [
                 // Sparkle.framework кладётся в Contents/Frameworks бандла (scripts/make-app.sh)
-                .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"]),
+                .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks",
+                              // CLI из .build (--render и т.п.): Sparkle.framework лежит рядом с бинарником
+                              "-Xlinker", "-rpath", "-Xlinker", "@executable_path"]),
             ]
         ),
         .testTarget(

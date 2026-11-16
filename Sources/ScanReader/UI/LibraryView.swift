@@ -76,8 +76,8 @@ struct LibraryRoot: View {
 struct FolderPickerView: View {
     var body: some View {
         VStack(spacing: 18) {
-            Image(systemName: "books.vertical").font(.system(size: 56, weight: .thin)).foregroundStyle(.orange)
-            Text("Выберите папку библиотеки").font(.title2.weight(.semibold))
+            LampIllustration().frame(width: 160, height: 140)
+            Text("Выберите папку библиотеки").font(.system(.title2, design: .serif).weight(.semibold))
             Text("""
                 Здесь будут храниться книги, распознанный текст, улучшенные иллюстрации, обложки и прогресс чтения. \
                 Выберите папку в iCloud Drive — тогда библиотека будет одинаковой на всех ваших устройствах, \
@@ -85,7 +85,7 @@ struct FolderPickerView: View {
                 """)
                 .multilineTextAlignment(.center).foregroundStyle(.secondary).frame(maxWidth: 460)
             Button("Выбрать папку…") { FolderPickerView.choose() }
-                .buttonStyle(.borderedProminent).controlSize(.large)
+                .buttonStyle(.borderedProminent).tint(Brand.amber).foregroundStyle(.black).controlSize(.large)
             Text("Папку можно сменить позже в Настройках (⌘,)").font(.caption).foregroundStyle(.tertiary)
         }
         .padding(40)
@@ -114,6 +114,7 @@ struct LibraryView: View {
     @State private var showAppleBooks = false
     @State private var newCollection = false
     @State private var newCollectionName = ""
+    @Environment(\.colorScheme) private var scheme
 
     private var sort: LibrarySort { LibrarySort(rawValue: sortRaw) ?? .recent }
 
@@ -135,25 +136,35 @@ struct LibraryView: View {
             List(selection: $filter) {
                 Section("Библиотека") {
                     ForEach([LibraryFilter.all, .reading, .finished, .pdf, .epub, .scans], id: \.self) { f in
-                        Label(f.title, systemImage: f.symbol).tag(f)
+                        SidebarRow(title: f.title, symbol: f.symbol, count: store.books.filter(f.matches).count).tag(f)
                     }
                 }
                 Section("Мои коллекции") {
                     ForEach(store.collections, id: \.self) { c in
-                        Label(c, systemImage: "list.bullet").tag(LibraryFilter.collection(c))
+                        SidebarRow(title: c, symbol: "books.vertical", count: store.books.filter { $0.collections.contains(c) }.count)
+                            .tag(LibraryFilter.collection(c))
                     }
                     Button { newCollection = true } label: { Label("Новая коллекция", systemImage: "plus") }
                         .buttonStyle(.plain).foregroundStyle(.secondary)
+                        .accessibilityLabel("Новая коллекция")
                 }
             }
-            .navigationSplitViewColumnWidth(min: 190, ideal: 210)
+            .scrollContentBackground(.hidden)
+            .background(Brand.sidebar(scheme))
+            .navigationSplitViewColumnWidth(min: 200, ideal: 220)
+            .tourAnchor("library.sidebar")
         } detail: {
             content
+                .background(Brand.paper(scheme))
+                .tourAnchor("library.grid")
                 .navigationTitle((filter ?? .all).title)
                 .searchable(text: $query, placement: .toolbar, prompt: "Поиск")
                 .toolbar { toolbar }
+                .toolbarBackground(Brand.paper(scheme), for: .windowToolbar)
         }
         .dropDestination(for: URL.self) { urls, _ in store.importFiles(urls); return true }
+        .tourOverlay(.library)
+        .onAppear { TourCenter.shared.startIfNeeded(.library) }
         .sheet(isPresented: $showAppleBooks) { AppleBooksImportSheet() }
         .alert("Новая коллекция", isPresented: $newCollection) {
             TextField("Название", text: $newCollectionName)
@@ -162,30 +173,53 @@ struct LibraryView: View {
         }
     }
 
+    /// «Продолжить чтение»: начатые и не дочитанные, последние открытые первыми.
+    private var continueReading: [LibraryBook] {
+        store.books.filter { ($0.progress ?? 0) > 0 && !$0.finished }
+            .sorted { ($0.lastOpened ?? .distantPast) > ($1.lastOpened ?? .distantPast) }
+            .prefix(4).map { $0 }
+    }
+
     @ViewBuilder
     private var content: some View {
         if store.books.isEmpty {
-            VStack(spacing: 12) {
-                Image(systemName: "books.vertical").font(.system(size: 44, weight: .thin)).foregroundStyle(.secondary)
-                Text(store.scanning ? "Читаю папку…" : "В библиотеке пока нет книг").foregroundStyle(.secondary)
-                Text("Перетащите PDF, EPUB, сканы или папку со сканами сюда либо нажмите «Импорт».")
-                    .font(.callout).foregroundStyle(.tertiary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            EmptyLibraryView(scanning: store.scanning, importFiles: chooseFiles)
         } else if grid {
             ScrollView {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 180), spacing: 28, alignment: .bottom)],
-                          alignment: .leading, spacing: 30) {
-                    ForEach(shown) { book in
-                        BookCell(book: book, selected: selection == book.id)
-                            .onTapGesture(count: 2) { open(book) }
-                            .onTapGesture { selection = book.id }
-                            .contextMenu { menu(book) }
+                VStack(alignment: .leading, spacing: 32) {
+                    if (filter ?? .all) == .all, query.isEmpty, !continueReading.isEmpty {
+                        VStack(alignment: .leading, spacing: 16) {
+                            SectionHeader(title: "Продолжить чтение", subtitle: nil)
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(alignment: .top, spacing: 24) {
+                                    ForEach(continueReading) { book in
+                                        ContinueCard(book: book) { open(book) }.contextMenu { menu(book) }
+                                    }
+                                }
+                                .padding(.vertical, 16).padding(.horizontal, 4)
+                            }
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: 16) {
+                        SectionHeader(title: (filter ?? .all).title, subtitle: countText(shown.count))
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 152, maximum: 184), spacing: 24, alignment: .bottom)],
+                                  alignment: .leading, spacing: 32) {
+                            ForEach(shown) { book in
+                                BookCell(book: book, selected: selection == book.id)
+                                    .onTapGesture(count: 2) { open(book) }
+                                    .onTapGesture { selection = book.id }
+                                    .contextMenu { menu(book) }
+                                    .accessibilityElement(children: .combine)
+                                    .accessibilityAddTraits(.isButton)
+                                    .accessibilityAction { open(book) }
+                            }
+                        }
                     }
                 }
-                .padding(28)
+                .padding(32)
             }
             .focusable()
+            .focusEffectDisabled()
             .onKeyPress(.return) {
                 if let b = shown.first(where: { $0.id == selection }) { open(b); return .handled }
                 return .ignored
@@ -193,19 +227,22 @@ struct LibraryView: View {
         } else {
             List(shown, selection: $selection) { book in
                 HStack(spacing: 12) {
-                    CoverView(book: book).frame(width: 34, height: 46)
+                    CoverView(book: book).frame(width: 32, height: 44)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(book.title).lineLimit(1)
                         Text(book.author ?? "").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
                     Spacer()
-                    Text(book.kind.rawValue.uppercased()).font(.caption2).foregroundStyle(.tertiary)
-                    ProgressBadge(book: book).frame(width: 64, alignment: .trailing)
+                    Text(book.kind.rawValue.uppercased()).font(.caption2).foregroundStyle(.secondary)
+                    ProgressBadge(book: book).frame(width: 72, alignment: .trailing)
                 }
+                .padding(.vertical, 4)
                 .contentShape(Rectangle())
                 .onTapGesture(count: 2) { open(book) }
                 .contextMenu { menu(book) }
             }
+            .scrollContentBackground(.hidden)
+            .focusEffectDisabled()
             .onKeyPress(.return) {
                 if let b = shown.first(where: { $0.id == selection }) { open(b); return .handled }
                 return .ignored
@@ -213,12 +250,18 @@ struct LibraryView: View {
         }
     }
 
+    private func countText(_ n: Int) -> String {
+        let m10 = n % 10, m100 = n % 100
+        let w = m10 == 1 && m100 != 11 ? "книга" : (2...4).contains(m10) && !(12...14).contains(m100) ? "книги" : "книг"
+        return "\(n) \(w)"
+    }
+
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItemGroup {
             Menu {
                 Button("Из Apple Books…") { showAppleBooks = true }
-                Button("Файлы…") { chooseFiles() }
+                Button("Файлы…") { chooseFiles() }.keyboardShortcut("o")
             } label: { Label("Импорт", systemImage: "square.and.arrow.down") }
                 .help("Импорт книг в библиотеку")
             Menu {
@@ -268,38 +311,46 @@ struct LibraryView: View {
 
 struct CoverView: View {
     let book: LibraryBook
+    var glow = false
     @ObservedObject var store = LibraryStore.shared
 
     var body: some View {
-        if let img = store.cover(for: book) ?? store.covers[book.id] {
-            Image(nsImage: img).resizable().aspectRatio(contentMode: .fit)
-                .clipShape(RoundedRectangle(cornerRadius: 4))
-                .shadow(color: .black.opacity(0.28), radius: 4, x: 0, y: 3)
-        } else {
-            // заглушка, пока строится обложка: цвет по названию + название
-            let hue = Double(abs(book.title.hashValue % 360)) / 360
-            RoundedRectangle(cornerRadius: 4)
-                .fill(LinearGradient(colors: [Color(hue: hue, saturation: 0.35, brightness: 0.75),
-                                              Color(hue: hue, saturation: 0.45, brightness: 0.55)],
-                                     startPoint: .top, endPoint: .bottom))
-                .aspectRatio(0.7, contentMode: .fit)
-                .overlay(Text(book.title).font(.system(size: 12, weight: .semibold, design: .serif))
-                    .foregroundStyle(.white).multilineTextAlignment(.center).padding(10))
-                .shadow(color: .black.opacity(0.28), radius: 4, x: 0, y: 3)
+        Group {
+            if let img = store.cover(for: book) ?? store.covers[book.id] {
+                Image(nsImage: img).resizable().aspectRatio(contentMode: .fit)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+            } else {
+                // заглушка, пока строится обложка: тёплый тон по названию + название
+                let hue = 0.05 + Double(abs(book.title.hashValue % 100)) / 1000
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(LinearGradient(colors: [Color(hue: hue, saturation: 0.45, brightness: 0.72),
+                                                  Color(hue: hue, saturation: 0.55, brightness: 0.48)],
+                                         startPoint: .top, endPoint: .bottom))
+                    .aspectRatio(0.7, contentMode: .fit)
+                    .overlay(Text(book.title).font(.system(size: 12, weight: .semibold, design: .serif))
+                        .foregroundStyle(.white).multilineTextAlignment(.center).padding(10))
+            }
         }
+        // мягкий свет лампы под обложкой
+        .shadow(color: glow ? Brand.amber.opacity(0.45) : .black.opacity(0.22), radius: glow ? 22 : 5, x: 0, y: glow ? 10 : 3)
+        .accessibilityHidden(true)
     }
 }
 
 struct ProgressBadge: View {
     let book: LibraryBook
+    @Environment(\.colorScheme) private var scheme
     var body: some View {
         if book.isNew {
-            Text("НОВОЕ").font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
-                .padding(.horizontal, 6).padding(.vertical, 2).background(Capsule().fill(Color.blue))
+            Text("НОВОЕ").font(.caption2.weight(.bold)).foregroundStyle(Color.black.opacity(0.85))
+                .padding(.horizontal, 8).padding(.vertical, 2).background(Capsule().fill(Brand.amber))
+                .accessibilityLabel("Новая книга")
         } else if book.finished {
-            Text("ПРОЧИТАНО").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
+            Label("Прочитано", systemImage: "checkmark").labelStyle(.titleAndIcon)
+                .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
         } else if let p = book.progress {
-            Text("\(Int((p * 100).rounded()))%").font(.system(size: 11)).foregroundStyle(.secondary)
+            Text("\(Int((p * 100).rounded()))%").font(.caption.monospacedDigit()).foregroundStyle(Brand.amberText(scheme))
+                .accessibilityLabel("Прочитано \(Int((p * 100).rounded())) процентов")
         }
     }
 }
@@ -307,22 +358,119 @@ struct ProgressBadge: View {
 struct BookCell: View {
     let book: LibraryBook
     let selected: Bool
+    @State private var hover = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             CoverView(book: book)
-                .frame(height: 210, alignment: .bottom)
+                .frame(height: 216, alignment: .bottom)
                 .frame(maxWidth: .infinity)
-                .padding(4)
-                .background(RoundedRectangle(cornerRadius: 8).fill(selected ? Color.accentColor.opacity(0.18) : .clear))
-            Text(book.title).font(.system(size: 12, weight: .medium)).lineLimit(2)
+                .scaleEffect(hover ? 1.02 : 1, anchor: .bottom)
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 10).fill(selected ? Brand.amber.opacity(0.22) : .clear))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(selected ? Brand.amber.opacity(0.8) : .clear, lineWidth: 1.5))
+            Text(book.title).font(.callout.weight(.medium)).lineLimit(2)
             HStack(alignment: .firstTextBaseline) {
-                Text(book.author ?? " ").font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                Text(book.author ?? " ").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 Spacer(minLength: 4)
                 ProgressBadge(book: book)
             }
         }
         .contentShape(Rectangle())
+        .onHover { h in withAnimation(.easeOut(duration: 0.15)) { hover = h } }
+    }
+}
+
+/// Крупная карточка «Продолжить чтение»: обложка со свечением, название, полоса прогресса.
+struct ContinueCard: View {
+    let book: LibraryBook
+    var open: () -> Void
+    @State private var hover = false
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        Button(action: open) {
+            HStack(alignment: .bottom, spacing: 16) {
+                CoverView(book: book, glow: true).frame(width: 112, height: 160, alignment: .bottom)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(book.title).font(.system(.title3, design: .serif).weight(.semibold)).lineLimit(2)
+                    if let a = book.author { Text(a).font(.callout).foregroundStyle(.secondary).lineLimit(1) }
+                    Spacer(minLength: 0)
+                    ProgressView(value: book.progress ?? 0).tint(Brand.amber).frame(width: 136)
+                    Text("Прочитано \(Int(((book.progress ?? 0) * 100).rounded()))%").font(.caption)
+                        .foregroundStyle(Brand.amberText(scheme))
+                }
+                .frame(width: 152, height: 160, alignment: .topLeading)
+            }
+            .padding(16)
+            .background(RoundedRectangle(cornerRadius: 16).fill(Color.primary.opacity(hover ? 0.07 : 0.04)))
+            .contentShape(RoundedRectangle(cornerRadius: 16))
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .accessibilityLabel("\(book.title), прочитано \(Int(((book.progress ?? 0) * 100).rounded())) процентов")
+        .accessibilityHint("Открыть книгу")
+    }
+}
+
+struct SectionHeader: View {
+    let title: String
+    let subtitle: String?
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(title).font(.system(.title, design: .serif).weight(.semibold))
+            if let subtitle { Text(subtitle).font(.callout).foregroundStyle(.secondary) }
+        }
+        .accessibilityAddTraits(.isHeader)
+    }
+}
+
+struct SidebarRow: View {
+    let title: String
+    let symbol: String
+    let count: Int
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        HStack {
+            Label {
+                Text(title)
+            } icon: {
+                Image(systemName: symbol).symbolRenderingMode(.hierarchical).foregroundStyle(Brand.amberText(scheme))
+            }
+            Spacer()
+            if count > 0 { Text("\(count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// Пустая библиотека: лампа над раскрытой книгой.
+struct EmptyLibraryView: View {
+    let scanning: Bool
+    var importFiles: () -> Void
+    var body: some View {
+        VStack(spacing: 16) {
+            LampIllustration().frame(width: 160, height: 140)
+            Text(scanning ? "Читаю папку…" : "Здесь будет светло от книг").font(.system(.title2, design: .serif).weight(.semibold))
+            Text("Перетащите PDF, EPUB, сканы или папку со сканами в окно — или импортируйте их.")
+                .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 360)
+            Button("Импортировать файлы…", action: importFiles).buttonStyle(.borderedProminent).tint(Brand.amber)
+                .foregroundStyle(.black).controlSize(.large)
+        }
+        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+struct LampIllustration: View {
+    var body: some View {
+        ZStack {
+            Circle().fill(RadialGradient(colors: [Brand.amber.opacity(0.55), .clear], center: .center, startRadius: 4, endRadius: 80))
+                .offset(y: 18)
+            Image(systemName: "lamp.desk.fill").font(.system(size: 54)).foregroundStyle(Brand.amber).offset(x: 34, y: -34)
+            Image(systemName: "book").font(.system(size: 54, weight: .light)).foregroundStyle(.secondary).offset(y: 34)
+        }
+        .accessibilityHidden(true)
     }
 }
 

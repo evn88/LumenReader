@@ -671,6 +671,7 @@ private struct EPUBReaderContent: View {
                     }
                 }
                 .clipped()
+                .tourAnchor("book.page")
                     .background(GeometryReader { g in
                         Color.clear.onAppear { size = g.size; turner.width = g.size.width }
                             .onChange(of: g.size) { size = g.size; turner.width = g.size.width }
@@ -688,6 +689,7 @@ private struct EPUBReaderContent: View {
                 nav("chevron.left", key: .leftArrow) { turner.turn(-1) { c.prev() } }
                 Spacer()
                 nav("chevron.right", key: .rightArrow) { turner.turn(1) { c.next() } }
+                    .tourAnchor("book.next")
             }
             .frame(maxHeight: .infinity)
             .opacity(chrome.visible ? 1 : 0)
@@ -718,6 +720,9 @@ private struct EPUBReaderContent: View {
         .onChange(of: showTOC || showNotes || showAppearance || showSearch || showCustomize) { _, open in chrome.pinned = open }
         .onAppear { chrome.scheduleHide(after: 3) }
         .sheet(isPresented: $showCustomize) { CustomizeSheet() }
+        .tourOverlay(.book)
+        .onAppear { TourCenter.shared.startIfNeeded(.book) }
+        .onReceive(TourCenter.shared.$part) { chrome.pinned = $0 == .book || showTOC || showNotes || showAppearance || showSearch }
     }
 
 
@@ -746,6 +751,7 @@ private struct EPUBReaderContent: View {
                     .popover(isPresented: $showTOC, arrowEdge: .bottom) { toc }
                 bar(twoPages ? "book.pages" : "rectangle.portrait", twoPages ? "Одна страница" : "Разворот") { twoPages.toggle() }
                 bar("note.text", "Заметки и закладки") { showNotes.toggle() }
+                    .tourAnchor("book.notes")
                     .popover(isPresented: $showNotes, arrowEdge: .bottom) { notes }
             }
             .padding(.horizontal, 4).padding(.vertical, 3).modifier(GlassCapsule())
@@ -761,10 +767,12 @@ private struct EPUBReaderContent: View {
                     .frame(width: 36, height: 30).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain).focusEffectDisabled().foregroundStyle(ink).help("Темы и настройки")
+                .tourAnchor("book.aa")
                 .popover(isPresented: $showAppearance, arrowEdge: .bottom) {
                     AppearancePopover { showAppearance = false; showCustomize = true }
                 }
                 bar("magnifyingglass", "Поиск") { showSearch.toggle() }
+                    .tourAnchor("book.search")
                     .keyboardShortcut("f")
                     .popover(isPresented: $showSearch, arrowEdge: .bottom) { search }
             }
@@ -787,7 +795,7 @@ private struct EPUBReaderContent: View {
         Button(action: action) {
             Image(systemName: symbol).font(.system(size: 15)).frame(width: 36, height: 30).contentShape(Rectangle())
         }
-        .buttonStyle(.plain).focusEffectDisabled().foregroundStyle(ink).help(help)
+        .buttonStyle(.plain).focusEffectDisabled().foregroundStyle(ink).help(help).accessibilityLabel(help)
     }
 
     private func nav(_ symbol: String, key: KeyEquivalent, action: @escaping () -> Void) -> some View {
@@ -796,6 +804,7 @@ private struct EPUBReaderContent: View {
                 .frame(width: 44, height: 120).contentShape(Rectangle())
         }
         .buttonStyle(.plain).keyboardShortcut(key, modifiers: [])
+        .accessibilityLabel(symbol.contains("left") ? "Предыдущая страница" : "Следующая страница")
     }
 
     private var toc: some View {

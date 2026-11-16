@@ -56,6 +56,7 @@ struct DevelopmentSupportSection: View {
 
 /// Окно «О программе»: версия, ссылка на исходники, кнопка поддержки.
 struct AboutView: View {
+    @Environment(\.colorScheme) private var scheme
     var body: some View {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
         VStack(spacing: 14) {
@@ -66,11 +67,19 @@ struct AboutView: View {
             Divider()
             if let site = SupportConfiguration.siteURL {
                 Link(site.host ?? site.absoluteString, destination: site)
+                    .foregroundStyle(Brand.amberText(scheme)).focusable(false)
             }
             Link("github.com/evn88", destination: URL(string: "https://github.com/evn88")!)
+                .foregroundStyle(Brand.amberText(scheme)).focusable(false)
             if let url = SupportConfiguration.pageURL {
-                Link(destination: url) { Label("GitHub Sponsors", systemImage: "heart") }
-                    .buttonStyle(.borderedProminent)
+                // тёмный текст на янтаре: белый не проходит по контрасту (2:1)
+                Link(destination: url) {
+                    Label("GitHub Sponsors", systemImage: "heart.fill").font(.callout.weight(.semibold))
+                        .foregroundStyle(.black.opacity(0.85))
+                        .padding(.horizontal, 14).padding(.vertical, 6)
+                        .background(Capsule().fill(Brand.amber))
+                }
+                .buttonStyle(.plain).focusable(false)
                     .help("Открыть страницу поддержки в браузере")
             }
             Text("Свободная программа под лицензией MIT").font(.caption).foregroundStyle(.secondary)
