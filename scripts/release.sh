@@ -34,6 +34,16 @@ if [[ -n "${SPARKLE_PRIVATE_KEY:-}" ]]; then KEY=(--ed-key-file -); else KEY=(--
 print -rn -- "${SPARKLE_PRIVATE_KEY:-}" | "$TOOLS/generate_appcast" "${KEY[@]}" \
   --download-url-prefix "https://github.com/$REPO/releases/download/$TAG/" \
   --link "https://github.com/$REPO/releases/tag/$TAG" --maximum-deltas 0 --maximum-versions 1 "$FEED"
+# минимальная версия macOS — в ленту (Sparkle не предложит обновление на старой системе)
+MIN_OS="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$BUILD_DIR/$PRODUCT_NAME.app/Contents/Info.plist")"
+python3 - "$FEED/appcast.xml" "$MIN_OS" <<'PY'
+import sys, re
+p, v = sys.argv[1], sys.argv[2]
+s = open(p).read()
+if "sparkle:minimumSystemVersion" not in s:
+    s = s.replace("</sparkle:shortVersionString>", "</sparkle:shortVersionString>\n            <sparkle:minimumSystemVersion>%s</sparkle:minimumSystemVersion>" % v, 1)
+open(p, "w").write(s)
+PY
 cp "$FEED/appcast.xml" "$BUILD_DIR/appcast.xml"
 print -rn -- "${SPARKLE_PRIVATE_KEY:-}" | "$TOOLS/sign_update" "${KEY[@]}" "$BUILD_DIR/appcast.xml"
 print -rn -- "${SPARKLE_PRIVATE_KEY:-}" | "$TOOLS/sign_update" "${KEY[@]}" --verify "$BUILD_DIR/appcast.xml"

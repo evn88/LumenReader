@@ -32,7 +32,7 @@ cp .build/release/ScanReader "$APP/Contents/MacOS/$PRODUCT_NAME"
 cp "$WORK/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 # фирменный акцент (AccentColor): выделение в списках, кнопки, переключатели — янтарь вместо синего
 xcrun actool Resources/Assets.xcassets --compile "$APP/Contents/Resources" --platform macosx \
-  --minimum-deployment-target 14.0 --output-partial-info-plist "$WORK/assets.plist" >/dev/null
+  --minimum-deployment-target 26.0 --output-partial-info-plist "$WORK/assets.plist" >/dev/null
 # Sparkle (автообновление) — во Frameworks, как в PangoZip
 mkdir -p "$APP/Contents/Frameworks"
 ditto .build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework \
@@ -53,7 +53,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleVersion</key><string>${BUILD_NUMBER:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}</string>
   <key>CFBundleDevelopmentRegion</key><string>ru</string>
   <key>CFBundleLocalizations</key><array><string>ru</string></array>
-  <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>LSMinimumSystemVersion</key><string>26.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.books</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>

@@ -37,12 +37,31 @@ final class DisplayNameTests: XCTestCase {
         XCTAssertEqual(a.title, "Базовая математика для искусственного интеллекта 2024"); XCTAssertNil(a.author)
         let g = BookMetadata.resolve(title: "Гриффитс Д., Гриффитс Д. - React. Сборник рецептов - 2023", author: "UnknownAuthor",
                                      fileName: "Гриффитс Д., Гриффитс Д. - React. Сборник рецептов - 2023")
-        XCTAssertEqual(g.title, "React. Сборник рецептов"); XCTAssertEqual(g.author, "Гриффитс Д., Гриффитс Д.")
+        XCTAssertEqual(g.title, "React. Сборник рецептов"); XCTAssertEqual(g.author, "Гриффитс Д.")
     }
 
     func testNoBreaksInsideWords() {
         let s = BookMetadata.unbreakableWords("Базовая математика")
         XCTAssertEqual(s.replacingOccurrences(of: "\u{2060}", with: ""), "Базовая математика")
         XCTAssertEqual(s.split(separator: " ").count, 2, "переносы только по пробелам")
+    }
+}
+
+final class AuthorDedupeTests: XCTestCase {
+    func testDuplicatesCollapse() {
+        XCTAssertEqual(BookMetadata.author("Гриффитс Д., Гриффитс Д."), "Гриффитс Д.")
+        XCTAssertEqual(BookMetadata.author("Wathan A., Schoger S"), "Wathan A., Schoger S")
+        XCTAssertEqual(BookMetadata.author("Бек А.; Фримен А.; Бек А."), "Бек А.; Фримен А.")
+        XCTAssertEqual(BookMetadata.fromFileName("Гриффитс Д., Гриффитс Д. - React. Сборник рецептов - 2023")?.author, "Гриффитс Д.")
+    }
+}
+
+/// Тесты не трогают настоящую библиотеку: всё, что они пишут, — во временной папке.
+final class TestIsolationTests: XCTestCase {
+    func testTestsWriteOnlyToTemporaryFolders() {
+        let tmp = FileManager.default.temporaryDirectory.path
+        XCTAssertFalse(tmp.contains("Mobile Documents"))
+        // глобальная папка библиотеки приложения тестами не задаётся
+        XCTAssertNil(UserDefaults(suiteName: "io.github.evn88.lumenreader.tests")?.data(forKey: "libraryBookmark"))
     }
 }

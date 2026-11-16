@@ -15,7 +15,18 @@ enum BookMetadata {
             .reduce(into: "") { $0.unicodeScalars.append($1) }
             .trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "⍰?")))
         guard !cleaned.isEmpty, !placeholders.contains(cleaned.lowercased()) else { return nil }
-        return cleaned
+        return dedupeAuthors(cleaned)
+    }
+
+    /// «Гриффитс Д., Гриффитс Д.» → «Гриффитс Д.»: одинаковые имена в списке авторов схлопываются, порядок сохраняется.
+    static func dedupeAuthors(_ s: String) -> String {
+        let sep = s.contains(";") ? ";" : ","
+        // «Wathan A., Schoger S» — запятая разделяет авторов; «Иванов, И. И.» (инициалы после запятой) не трогаем
+        let parts = s.components(separatedBy: sep).map { $0.trimmingCharacters(in: .whitespaces) }
+        guard parts.count > 1, parts.allSatisfy({ $0.count > 3 }) else { return s }
+        var seen = Set<String>(), out: [String] = []
+        for p in parts where seen.insert(p.lowercased().replacingOccurrences(of: ".", with: "")).inserted { out.append(p) }
+        return out.joined(separator: sep + " ")
     }
 
     /// «Автор - Название - Год» (или «Автор - Название») в имени файла → (автор, название).
@@ -28,7 +39,7 @@ enum BookMetadata {
             let year = parts[2].filter(\.isNumber)
             guard year.count == 4, parts[2].count <= 9 else { return nil }
         }
-        let author = parts[0], title = parts[1]
+        let author = dedupeAuthors(parts[0]), title = parts[1]
         // автор похож на имена: есть буквы, нет «лишних» слов книжного названия
         guard author.count <= 60, author.rangeOfCharacter(from: .letters) != nil, title.count >= 2 else { return nil }
         return (author, title)

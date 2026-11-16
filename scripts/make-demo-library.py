@@ -5,6 +5,9 @@ import json, os, shutil, subprocess, sys, datetime
 root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 demo = os.path.join(root, "demo")
 lib = os.path.join(demo, "library")
+# защита: скрипт пишет только в demo/library этого репозитория — никогда в iCloud или настоящую библиотеку
+assert os.path.realpath(lib).startswith(os.path.realpath(demo) + os.sep), lib
+assert "Mobile Documents" not in os.path.realpath(lib), lib
 shutil.rmtree(lib, ignore_errors=True)
 os.makedirs(os.path.join(lib, ".scanreader"))
 

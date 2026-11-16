@@ -35,7 +35,7 @@
 
 ## Требования
 
-- macOS 14+ (Liquid Glass и новейшие модели Vision — на macOS 26+)
+- macOS 26 Tahoe или новее
 - Xcode 16+ / Swift 6
 
 ## Сборка и запуск

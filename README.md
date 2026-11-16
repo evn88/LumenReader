@@ -34,7 +34,7 @@ Website: [ai-soft.app](https://ai-soft.app) · [Русская версия](REA
 
 ## Requirements
 
-- macOS 14+ (Liquid Glass and the newest Vision models on macOS 26+)
+- macOS 26 Tahoe or later
 - Xcode 16+ / Swift 6 toolchain
 
 ## Build & run

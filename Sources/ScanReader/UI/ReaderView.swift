@@ -458,36 +458,16 @@ struct ReaderView: View {
     }
 }
 
-/// Капсула в стиле Liquid Glass (macOS 26+), иначе — материал с тонкой обводкой и мягкой тенью.
+/// Капсула Liquid Glass (macOS 26+).
 struct GlassCapsule: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(macOS 26.0, *) {
-            content.glassEffect(.regular, in: .capsule)
-        } else {
-            content
-                .background(.ultraThinMaterial, in: Capsule())
-                .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
-                .shadow(color: .black.opacity(0.08), radius: 3, y: 1)
-        }
-    }
+    func body(content: Content) -> some View { content.glassEffect(.regular, in: .capsule) }
 }
 
 struct GlassCircle: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(macOS 26.0, *) {
-            content.glassEffect(.regular, in: .circle)
-        } else {
-            content
-                .background(.ultraThinMaterial, in: Circle())
-                .overlay(Circle().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
-                .shadow(color: .black.opacity(0.08), radius: 3, y: 1)
-        }
-    }
+    func body(content: Content) -> some View { content.glassEffect(.regular, in: .circle) }
 }
 
 /// Перетаскивание окна за заголовок (строки заголовка нет — .hiddenTitleBar).
 struct WindowDrag: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(macOS 15.0, *) { content.gesture(WindowDragGesture()) } else { content }
-    }
+    func body(content: Content) -> some View { content.gesture(WindowDragGesture()) }
 }

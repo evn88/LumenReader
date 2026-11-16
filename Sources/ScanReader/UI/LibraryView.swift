@@ -138,12 +138,13 @@ struct LibraryView: View {
             List(selection: $filter) {
                 Section("Библиотека") {
                     ForEach([LibraryFilter.all, .reading, .finished, .pdf, .epub, .scans], id: \.self) { f in
-                        SidebarRow(title: f.title, symbol: f.symbol, count: store.books.filter(f.matches).count).tag(f)
+                        SidebarRow(title: f.title, symbol: f.symbol, count: store.books.filter(f.matches).count, selected: filter == f).tag(f)
                     }
                 }
                 Section("Мои коллекции") {
                     ForEach(store.collections, id: \.self) { c in
-                        SidebarRow(title: c, symbol: "books.vertical", count: store.books.filter { $0.collections.contains(c) }.count)
+                        SidebarRow(title: c, symbol: "books.vertical", count: store.books.filter { $0.collections.contains(c) }.count,
+                                   selected: filter == .collection(c))
                             .tag(LibraryFilter.collection(c))
                             // сброс на коллекцию — книги сразу в неё
                             .onDrop(of: [.fileURL], delegate: CollectionDrop(inner: BookDropDelegate(dropCount: $dropCount, collection: c, store: store),
@@ -170,6 +171,7 @@ struct LibraryView: View {
                 .navigationTitle((filter ?? .all).title)
                 .searchable(text: $query, placement: .toolbar, prompt: "Поиск")
                 .toolbar { toolbar }
+
         }
         .onDrop(of: [.fileURL], delegate: BookDropDelegate(dropCount: $dropCount, store: store))
         .overlay { if let n = dropCount { DropHighlight(count: n, collection: dropCollection) } }
@@ -210,7 +212,7 @@ struct LibraryView: View {
                     }
                     VStack(alignment: .leading, spacing: 16) {
                         SectionHeader(title: (filter ?? .all).title, subtitle: countText(shown.count))
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 152, maximum: 184), spacing: 24, alignment: .bottom)],
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 152, maximum: 184), spacing: 24, alignment: .top)],
                                   alignment: .leading, spacing: 32) {
                             ForEach(shown) { book in
                                 BookCell(book: book, selected: selection == book.id)
@@ -226,6 +228,7 @@ struct LibraryView: View {
                 }
                 .padding(32)
             }
+            .scrollEdgeEffectStyle(.soft, for: .top)        // контент мягко размывается под стеклом тулбара
             .focusable()
             .focusEffectDisabled()
             .onKeyPress(.return) {
@@ -250,6 +253,7 @@ struct LibraryView: View {
                 .contextMenu { menu(book) }
             }
             .scrollContentBackground(.hidden)
+            .scrollEdgeEffectStyle(.soft, for: .top)
             .focusEffectDisabled()
             .onKeyPress(.return) {
                 if let b = shown.first(where: { $0.id == selection }) { open(b); return .handled }
@@ -264,26 +268,33 @@ struct LibraryView: View {
         return "\(n) \(w)"
     }
 
+    /// Системный тулбар macOS 26 (как в Finder/Music): вид — сегменты в своей капсуле, сортировка и импорт —
+    /// системные меню; поиск — .searchable; заголовок — navigationTitle. Своих фонов и размеров нет.
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
-        ToolbarItemGroup {
-            Menu {
-                Button("Из Apple Books…") { showAppleBooks = true }
-                Button("Файлы…") { chooseFiles() }.keyboardShortcut("o")
-            } label: { Label("Импорт", systemImage: "square.and.arrow.down") }
-                .help("Импорт книг в библиотеку")
+        ToolbarItem(placement: .primaryAction) {
+            Picker("Вид", selection: $grid) {
+                Label("Сетка", systemImage: "square.grid.2x2").tag(true)
+                Label("Список", systemImage: "list.bullet").tag(false)
+            }
+            .pickerStyle(.segmented)
+            .labelStyle(.iconOnly)
+            .help("Сетка или список")
+        }
+        ToolbarSpacer(.fixed, placement: .primaryAction)
+        ToolbarItemGroup(placement: .primaryAction) {
             Menu {
                 Picker("Сортировка", selection: $sortRaw) {
                     ForEach(LibrarySort.allCases, id: \.self) { Text($0.rawValue).tag($0.rawValue) }
                 }
                 .pickerStyle(.inline)
             } label: { Label("Сортировка", systemImage: "arrow.up.arrow.down") }
-            Picker("Вид", selection: $grid) {
-                Image(systemName: "square.grid.2x2").tag(true)
-                Image(systemName: "list.bullet").tag(false)
-            }
-            .pickerStyle(.segmented)
-            .help("Сетка / список")
+                .help("Сортировка")
+            Menu {
+                Button("Из Apple Books…") { showAppleBooks = true }
+                Button("Файлы…") { chooseFiles() }.keyboardShortcut("o")
+            } label: { Label("Импорт", systemImage: "square.and.arrow.down") }
+                .help("Импорт книг в библиотеку")
         }
     }
 
@@ -371,13 +382,15 @@ struct BookCell: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             CoverView(book: book)
-                .frame(height: 216, alignment: .bottom)
-                .frame(maxWidth: .infinity)
+                .frame(height: 216, alignment: .bottom)       // низ обложек — общая линия
+                .frame(maxWidth: .infinity, alignment: .bottom)
                 .scaleEffect(hover ? 1.02 : 1, anchor: .bottom)
                 .padding(8)
                 .background(RoundedRectangle(cornerRadius: 10).fill(selected ? Brand.amber.opacity(0.22) : .clear))
                 .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(selected ? Brand.amber.opacity(0.8) : .clear, lineWidth: 1.5))
-            Text(book.title).font(.callout.weight(.medium)).lineLimit(2)
+            // название — всегда место под 2 строки: обложки в ряду стоят на одной линии
+            Text(BookMetadata.unbreakableWords(book.title)).font(.callout.weight(.medium))
+                .lineLimit(2, reservesSpace: true).truncationMode(.tail)
             HStack(alignment: .firstTextBaseline) {
                 Text(book.author ?? "").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     .accessibilityHidden(book.author == nil)
@@ -403,7 +416,7 @@ struct ContinueCard: View {
                 CoverView(book: book, glow: true).frame(width: 112, height: 160, alignment: .bottom)
                 VStack(alignment: .leading, spacing: 8) {
                     Text(BookMetadata.unbreakableWords(book.title)).font(.system(.title3, design: .serif).weight(.semibold))
-                        .lineLimit(2).truncationMode(.tail)
+                        .lineLimit(2, reservesSpace: true).truncationMode(.tail)
                     if let a = book.author { Text(a).font(.callout).foregroundStyle(.secondary).lineLimit(1) }
                     Spacer(minLength: 0)
                     ProgressView(value: book.progress ?? 0).tint(Brand.amber).frame(width: 136)
@@ -439,22 +452,23 @@ struct SidebarRow: View {
     let title: String
     let symbol: String
     let count: Int
+    var selected = false
     @Environment(\.colorScheme) private var scheme
-    /// Выбранная строка в активном окне: текст и иконка — белые на акценте (HIG), а не янтарь на янтаре.
+    /// Выбранная строка в активном окне — белое на акценте; в неактивном (серая плашка) — основной цвет.
     @Environment(\.backgroundProminence) private var prominence
 
     var body: some View {
-        let selected = prominence == .increased
+        let onAccent = prominence == .increased
         HStack(spacing: 8) {
             Image(systemName: symbol)
                 .font(.system(size: 15))
                 .frame(width: 20, alignment: .center)
-                .foregroundStyle(selected ? AnyShapeStyle(.white) : AnyShapeStyle(Brand.amberText(scheme)))
+                .foregroundStyle(onAccent ? AnyShapeStyle(.white) : selected ? AnyShapeStyle(.primary) : AnyShapeStyle(Brand.amberText(scheme)))
             Text(title).lineLimit(1)
             Spacer(minLength: 8)
             if count > 0 {
                 Text("\(count)").font(.callout.monospacedDigit())
-                    .foregroundStyle(selected ? AnyShapeStyle(.white.opacity(0.85)) : AnyShapeStyle(.secondary))
+                    .foregroundStyle(onAccent ? AnyShapeStyle(.white.opacity(0.9)) : AnyShapeStyle(.secondary))
             }
         }
         .accessibilityElement(children: .combine)
