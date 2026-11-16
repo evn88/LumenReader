@@ -3,7 +3,7 @@ import XCTest
 
 final class BookMetadataTests: XCTestCase {
     func testPlaceholderAuthorsAreEmpty() {
-        for a in ["UnknownAuthor", "Unknown", "unknown", "", "   ", "⍰UnknownAuthor", "Неизвестный автор", nil] as [String?] {
+        for a in ["UnknownAuthor", "Unknown", "unknown", "", "   ", "⍰UnknownAuthor", "\u{E83A}UnknownAuthor", "\u{200B}Unknown\u{FEFF}", "Неизвестный автор", nil] as [String?] {
             XCTAssertNil(BookMetadata.author(a), "\(String(describing: a))")
         }
         XCTAssertEqual(BookMetadata.author("  Александр Швец "), "Александр Швец")
@@ -63,5 +63,13 @@ final class TestIsolationTests: XCTestCase {
         XCTAssertFalse(tmp.contains("Mobile Documents"))
         // глобальная папка библиотеки приложения тестами не задаётся
         XCTAssertNil(UserDefaults(suiteName: "io.github.evn88.lumenreader.tests")?.data(forKey: "libraryBookmark"))
+    }
+
+    /// Реальная запись из Apple Books: автор — заглушка с символом частного использования, название — имя файла.
+    func testAppleBooksPrivateUsePlaceholder() {
+        let file = "Dzhim_Nayp_-_EMDR_polnoe_rukovodstvo_-_2020"
+        let r = BookMetadata.resolve(title: file, author: "\u{E83A}UnknownAuthor", fileName: file)
+        XCTAssertEqual(r.author, "Dzhim Nayp")
+        XCTAssertEqual(r.title, "EMDR polnoe rukovodstvo")
     }
 }

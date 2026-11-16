@@ -11,7 +11,12 @@ enum BookMetadata {
     /// Автор или nil: пустые строки, заглушки и служебные символы — это «нет автора».
     static func author(_ raw: String?) -> String? {
         guard let raw else { return nil }
-        let cleaned = raw.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) && $0 != "\u{FFFD}" }
+        // Apple Books ставит перед «UnknownAuthor» значок из зоны частного использования (U+E83A) — его,
+        // как и невидимые форматирующие символы (U+200B, U+FEFF…), выбрасываем
+        let cleaned = raw.unicodeScalars.filter { s in
+            !CharacterSet.controlCharacters.contains(s) && s != "\u{FFFD}"
+                && s.properties.generalCategory != .privateUse && s.properties.generalCategory != .format
+        }
             .reduce(into: "") { $0.unicodeScalars.append($1) }
             .trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "⍰?")))
         guard !cleaned.isEmpty, !placeholders.contains(cleaned.lowercased()) else { return nil }
