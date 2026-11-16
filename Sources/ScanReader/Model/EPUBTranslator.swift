@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import SwiftUI
 import Translation
@@ -8,6 +9,10 @@ import WebKit
 protocol BookTranslating: ObservableObject {
     var target: String { get set }
     var showing: Bool { get set }
+    /// Язык книги, заданный читателем (nil — автоматически).
+    var sourceLanguage: String? { get set }
+    /// Язык книги, определённый автоматически.
+    var detectedLanguage: String? { get }
     var pendingDownload: TranslationProblem? { get }
     var downloadConfig: TranslationSession.Configuration? { get }
     var wholeBook: Bool { get }
@@ -42,6 +47,11 @@ final class EPUBTranslator: ObservableObject, BookTranslating {
 
     @Published var target: String { didSet { if target != oldValue { retarget() } } }
     @Published var showing = false { didSet { if showing != oldValue { syncMeta(); refreshCurrent() } } }
+    @Published var sourceLanguage: String? {
+        didSet { if sourceLanguage != oldValue { syncMeta(); done = []; problem = nil; refreshCurrent() } }
+    }
+    /// Язык из метаданных EPUB.
+    var detectedLanguage: String? { book.language.map(LanguageGuess.base) }
     @Published private(set) var problem: TranslationProblem?
     @Published private(set) var working = false
     @Published private(set) var done: Set<Int> = []
@@ -54,6 +64,7 @@ final class EPUBTranslator: ObservableObject, BookTranslating {
     private var job: Task<Void, Never>?
     private var current: Task<Void, Never>?
     private var worker: ChapterReader?
+    private var modelSink: AnyCancellable?
 
     var doneCount: Int { done.count }
     var totalCount: Int { book.spine.count }
@@ -63,12 +74,15 @@ final class EPUBTranslator: ObservableObject, BookTranslating {
         self.target = target
         store = TranslationStore(book: book.source, target: target)
         done = Set(store.keys().compactMap(Self.chapter))
+        modelSink = NotificationCenter.default.publisher(for: TranslationModel.changed).receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.retarget() }
         if let t = Sidecar.meta(book.source).translation {
             if let lang = t.target, lang != target, TranslationTarget.all.contains(where: { $0.code == lang }) {
                 self.target = lang
                 store = TranslationStore(book: book.source, target: lang)
                 done = Set(store.keys().compactMap(Self.chapter))
             }
+            sourceLanguage = t.source
             showing = t.showing ?? false
             if t.wholeBook == true { DispatchQueue.main.async { self.startBook() } }
         }
@@ -78,8 +92,8 @@ final class EPUBTranslator: ObservableObject, BookTranslating {
     private func key(_ i: Int) -> String { "chapter-\(i)" }
 
     private func syncMeta() {
-        let s = showing, w = wholeBook, t = target
-        Sidecar.update(book.source) { $0.translation = TranslationMeta(target: t, showing: s, wholeBook: w) }
+        let s = showing, w = wholeBook, t = target, src = sourceLanguage
+        Sidecar.update(book.source) { $0.translation = TranslationMeta(target: t, showing: s, wholeBook: w, source: src) }
     }
 
     private func retarget() {
@@ -91,9 +105,11 @@ final class EPUBTranslator: ObservableObject, BookTranslating {
         refreshCurrent()
     }
 
+    private func fingerprint(_ blocks: [String]) -> String { PageText.fingerprint(blocks + [sourceLanguage ?? ""]) }
+
     /// Сохранённый перевод главы, если он подходит к её текущему тексту.
     func cached(_ chapter: Int, blocks: [String]) -> [String?]? {
-        guard let e = store.load(key(chapter)), e.source == PageText.fingerprint(blocks), e.units.count == blocks.count else { return nil }
+        guard let e = store.load(key(chapter)), e.source == fingerprint(blocks), e.units.count == blocks.count else { return nil }
         return e.units
     }
 
@@ -108,9 +124,9 @@ final class EPUBTranslator: ObservableObject, BookTranslating {
             self.working = true
             self.problem = nil
             do {
-                let t = try await TranslationRouter.translate(blocks, to: self.target)
+                let t = try await TranslationRouter.translate(blocks, to: self.target, hint: self.detectedLanguage, source: self.sourceLanguage)
                 guard !Task.isCancelled else { return }
-                self.store.save(.init(source: PageText.fingerprint(blocks), units: t, engine: nil), self.key(ch))
+                self.store.save(.init(source: self.fingerprint(blocks), units: t, engine: nil), self.key(ch))
                 self.done.insert(ch)
                 self.working = false
                 if self.showing, self.currentChapter() == ch { self.apply?(ch, t) }
@@ -173,9 +189,9 @@ final class EPUBTranslator: ObservableObject, BookTranslating {
             if blocks.isEmpty { done.insert(i); continue }
             if cached(i, blocks: blocks) != nil { done.insert(i); continue }
             do {
-                let t = try await TranslationRouter.translate(blocks, to: target)
+                let t = try await TranslationRouter.translate(blocks, to: target, hint: detectedLanguage, source: sourceLanguage)
                 guard !Task.isCancelled else { return }
-                store.save(.init(source: PageText.fingerprint(blocks), units: t, engine: nil), key(i))
+                store.save(.init(source: fingerprint(blocks), units: t, engine: nil), key(i))
                 done.insert(i)
             } catch is CancellationError {
                 return

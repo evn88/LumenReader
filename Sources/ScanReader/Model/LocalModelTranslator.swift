@@ -2,41 +2,117 @@ import Combine
 import Foundation
 import llama
 
-/// Локальная модель перевода Gemma 4 E4B (официальная QAT-сборка Google, GGUF, llama.cpp на Metal) — для языков, которых нет
-/// у системного переводчика (сербский, чешский, хорватский…). Скачивается по кнопке в панели «Перевод».
-final class LocalModelTranslator: TranslationEngine, @unchecked Sendable {
-    static let shared = LocalModelTranslator()
-    let name = "Gemma 4"
+/// Модель перевода на выбор читателя: от встроенной в macOS до самой точной локальной.
+enum TranslationModel: String, CaseIterable, Identifiable, Sendable {
+    /// Системный переводчик Apple: встроен в macOS, быстрый, ~20 языков.
+    case apple
+    /// TranslateGemma 4B (Google, январь 2026, на базе Gemma 3) — специализированная модель перевода, 55 языков.
+    case translateGemma
+    /// Gemma 4 E4B (Google, март 2026, официальная QAT-сборка) — точнее всех в сравнении, 140 языков, Apache 2.0.
+    case gemma4
 
-    /// Gemma 4 E4B (март 2026) переводит точнее TranslateGemma 4B (январь 2026, на базе Gemma 3):
-    /// сравнение на сербском, англ→рус и рус→англ — меньше пересказа и отсебятины. Лицензия Apache 2.0.
-    static let fileName = "gemma-4-E4B_q4_0-it.gguf"
-    static let downloadURL = URL(string: "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/main/gemma-4-E4B_q4_0-it.gguf")!
-    static let approximateSize: Int64 = 5_150_000_000
-    /// Прежние модели — удаляются после перехода на новую.
-    static let legacyFiles = ["translategemma-4b-it.Q4_K_M.gguf"]
+    var id: String { rawValue }
+    static let defaultsKey = "translationModel"
+    static let changed = Notification.Name("translationModelChanged")
 
-    static var file: URL {
+    /// Выбранная модель (общая настройка приложения).
+    static var selected: TranslationModel {
+        get { UserDefaults.standard.string(forKey: defaultsKey).flatMap(TranslationModel.init) ?? .apple }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: defaultsKey)
+            NotificationCenter.default.post(name: changed, object: nil)
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .apple: "Системный переводчик Apple"
+        case .translateGemma: "TranslateGemma 4B"
+        case .gemma4: "Gemma 4 E4B"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .apple: "Встроен в macOS, самый быстрый. Около 20 языков, без сербского и чешского."
+        case .translateGemma: "Модель перевода от Google, 55 языков. Перевод страницы — около 10 секунд."
+        case .gemma4: "Самая точная, 140 языков. Медленнее, нужно больше памяти."
+        }
+    }
+
+    var sizeText: String {
+        switch self {
+        case .apple: "встроен"
+        case .translateGemma: "2,5 ГБ"
+        case .gemma4: "5,2 ГБ"
+        }
+    }
+
+    var isLocal: Bool { self != .apple }
+
+    var fileName: String? {
+        switch self {
+        case .apple: nil
+        case .translateGemma: "translategemma-4b-it.Q4_K_M.gguf"
+        case .gemma4: "gemma-4-E4B_q4_0-it.gguf"
+        }
+    }
+
+    var downloadURL: URL? {
+        switch self {
+        case .apple: nil
+        case .translateGemma: URL(string: "https://huggingface.co/mradermacher/translategemma-4b-it-GGUF/resolve/main/translategemma-4b-it.Q4_K_M.gguf")
+        case .gemma4: URL(string: "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/main/gemma-4-E4B_q4_0-it.gguf")
+        }
+    }
+
+    var approximateSize: Int64 {
+        switch self {
+        case .apple: 0
+        case .translateGemma: 2_489_909_760
+        case .gemma4: 5_150_000_000
+        }
+    }
+
+    var file: URL? {
+        guard let fileName else { return nil }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("\(Product.dataFolder)/Models/\(fileName)")
     }
 
-    var isInstalled: Bool { FileManager.default.fileExists(atPath: Self.file.path) }
+    var isInstalled: Bool { !isLocal || file.map { FileManager.default.fileExists(atPath: $0.path) } == true }
+}
+
+/// Локальная модель перевода (GGUF, llama.cpp на Metal).
+final class LocalModelTranslator: TranslationEngine, @unchecked Sendable {
+    let model: TranslationModel
+    var name: String { model.title }
+
+    init(_ model: TranslationModel) { self.model = model }
+
+    var isInstalled: Bool { model.isLocal && model.isInstalled }
 
     func canTranslate(from source: String, to target: String) async -> Bool {
         isInstalled && Self.languageName(source) != nil && Self.languageName(target) != nil
     }
 
     func translate(_ texts: [String], from source: String, to target: String) async throws -> [String] {
-        guard isInstalled else { throw TranslationProblem.unsupported(source: source, target: target) }
+        guard isInstalled, let file = model.file else { throw TranslationProblem.unsupported(source: source, target: target) }
         guard let sName = Self.languageName(source), let tName = Self.languageName(target) else {
             throw TranslationProblem.unsupported(source: source, target: target)
         }
         var out: [String] = []
         for t in texts {
             try Task.checkCancellation()
-            out.append(try await LlamaRunner.shared.generate(user: Self.instruction(t, source: sName, target: tName),
-                                                             model: Self.file, maxTokens: max(64, t.count * 2)))
+            let budget = max(64, t.count * 2)
+            switch model {
+            case .translateGemma:
+                let p = Self.prompt(t, source: (sName, LanguageGuess.base(source)), target: (tName, LanguageGuess.base(target)))
+                out.append(try await LlamaRunner.shared.generate(prompt: p, model: file, maxTokens: budget))
+            default:
+                out.append(try await LlamaRunner.shared.generate(user: Self.instruction(t, source: sName, target: tName),
+                                                                 model: file, maxTokens: budget))
+            }
         }
         return out
     }
@@ -53,7 +129,7 @@ final class LocalModelTranslator: TranslationEngine, @unchecked Sendable {
             + text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Промпт TranslateGemma (из chat_template.jinja модели) — для сравнения моделей через --llm.
+    /// Промпт TranslateGemma из шаблона чата модели (chat_template.jinja), без BOS — его добавит токенизатор.
     static func prompt(_ text: String, source: (String, String), target: (String, String)) -> String {
         "<start_of_turn>user\nYou are a professional \(source.0) (\(source.1)) to \(target.0) (\(target.1)) translator. "
             + "Your goal is to accurately convey the meaning and nuances of the original \(source.0) text while adhering to "
@@ -227,49 +303,76 @@ final class LlamaRunner: @unchecked Sendable {
     }
 }
 
-/// Скачивание и удаление модели (панель «Перевод»).
+/// Скачивание и удаление локальных моделей (по одной за раз).
 @MainActor
 final class LocalModelStore: NSObject, ObservableObject, URLSessionDownloadDelegate {
     static let shared = LocalModelStore()
 
     enum State: Equatable { case notInstalled, downloading(Double), installed, failed(String) }
-    @Published private(set) var state: State = .notInstalled
+    @Published private(set) var states: [TranslationModel: State] = [:]
+    @Published var selected: TranslationModel = TranslationModel.selected {
+        didSet { if selected != oldValue { TranslationModel.selected = selected } }
+    }
 
     private var task: URLSessionDownloadTask?
+    private var downloading: TranslationModel?
+    /// Выбрать модель, когда она скачается.
+    private var selectWhenReady = false
     private lazy var session = URLSession(configuration: .default, delegate: self, delegateQueue: .main)
 
     override init() {
         super.init()
-        let dir = LocalModelTranslator.file.deletingLastPathComponent()
-        for old in LocalModelTranslator.legacyFiles { try? FileManager.default.removeItem(at: dir.appendingPathComponent(old)) }
-        state = LocalModelTranslator.shared.isInstalled ? .installed : .notInstalled
+        for m in TranslationModel.allCases { states[m] = m.isInstalled ? .installed : .notInstalled }
+        if !selected.isInstalled { selected = .apple }
     }
 
-    func download() {
-        guard task == nil else { return }
-        state = .downloading(0)
-        task = session.downloadTask(with: LocalModelTranslator.downloadURL)
+    func state(_ m: TranslationModel) -> State { states[m] ?? .notInstalled }
+
+    var isBusy: Bool { downloading != nil }
+
+    /// Свободное место на диске с папкой моделей (байты).
+    var freeSpace: Int64? {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let v = try? base.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        return v?.volumeAvailableCapacityForImportantUsage
+    }
+
+    func download(_ m: TranslationModel, select: Bool = true) {
+        guard m.isLocal, task == nil, let url = m.downloadURL else { return }
+        downloading = m
+        selectWhenReady = select
+        states[m] = .downloading(0)
+        task = session.downloadTask(with: url)
         task?.resume()
     }
 
-    func cancel() { task?.cancel(); task = nil; state = .notInstalled }
+    func cancel() {
+        task?.cancel(); task = nil
+        if let m = downloading { states[m] = .notInstalled }
+        downloading = nil
+    }
 
-    func remove() {
+    func remove(_ m: TranslationModel) {
+        guard m.isLocal, let f = m.file else { return }
         LlamaRunner.shared.shutdown()
-        try? FileManager.default.removeItem(at: LocalModelTranslator.file)
-        state = .notInstalled
+        try? FileManager.default.removeItem(at: f)
+        states[m] = .notInstalled
+        if selected == m { selected = .apple }
     }
 
     nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64,
                                 totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        let total = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : LocalModelTranslator.approximateSize
-        let p = Double(totalBytesWritten) / Double(total)
-        MainActor.assumeIsolated { if case .downloading = state { state = .downloading(min(1, p)) } }
+        MainActor.assumeIsolated {
+            guard let m = downloading else { return }
+            let total = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : m.approximateSize
+            if case .downloading = states[m] { states[m] = .downloading(min(1, Double(totalBytesWritten) / Double(total))) }
+        }
     }
 
     nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         // файл во временной папке живёт только до конца этого вызова — переносим сразу
-        let dest = LocalModelTranslator.file
+        let model = MainActor.assumeIsolated { downloading }
+        guard let model, let dest = model.file else { return }
         let fm = FileManager.default
         var error: String?
         if let http = downloadTask.response as? HTTPURLResponse, http.statusCode != 200 {
@@ -288,14 +391,23 @@ final class LocalModelStore: NSObject, ObservableObject, URLSessionDownloadDeleg
         }
         let err = error
         MainActor.assumeIsolated {
-            task = nil
-            state = err.map { .failed("Не удалось скачать модель: \($0)") } ?? .installed
+            task = nil; downloading = nil
+            if let err {
+                states[model] = .failed("Не удалось скачать модель: \(err)")
+            } else {
+                states[model] = .installed
+                if selectWhenReady { selected = model }
+            }
         }
     }
 
     nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let error, (error as NSError).code != NSURLErrorCancelled else { return }
         let m = error.localizedDescription
-        MainActor.assumeIsolated { self.task = nil; state = .failed("Не удалось скачать модель: \(m)") }
+        MainActor.assumeIsolated {
+            self.task = nil
+            if let d = downloading { states[d] = .failed("Не удалось скачать модель: \(m)") }
+            downloading = nil
+        }
     }
 }

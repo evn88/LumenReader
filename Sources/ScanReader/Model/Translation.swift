@@ -14,6 +14,10 @@ struct TranslationTarget: Identifiable, Hashable {
         return name.prefix(1).uppercased() + name.dropFirst()
     }
 
+    /// Языки, которые можно указать как язык книги: целевые + те, что переводят только локальные модели.
+    static let sources: [TranslationTarget] = (all.map(\.code) + ["sr", "hr", "bs", "cs", "sk", "sl", "bg", "be", "el", "ro", "hu", "et", "lv", "lt", "kk"])
+        .map(TranslationTarget.init).sorted { $0.title.localizedCompare($1.title) == .orderedAscending }
+
     /// Языки системного переводчика Apple (macOS 26) — их предлагаем в списке целевых.
     static let all: [TranslationTarget] = ["ru", "en", "uk", "de", "fr", "es", "it", "pt", "pl", "nl", "tr",
                                            "ja", "zh", "ko", "ar", "hi", "id", "th", "vi", "sv", "da", "nb", "fi", "he"]
@@ -28,15 +32,66 @@ enum LanguageGuess {
         // короткие строки (заголовки, подписи) определяются ненадёжно — берём язык страницы
         if letters < 24, let hint { return hint }
         let r = NLLanguageRecognizer()
-        // язык страницы — сильная подсказка: абзац «Глава 3. Хуки» иначе легко уходит в казахский
+        // язык книги/страницы — сильная подсказка: абзац «Глава 3. Хуки» иначе легко уходит в казахский
         if let hint { r.languageHints = [NLLanguage(hint): 0.85] }
         r.processString(text)
-        guard let lang = r.dominantLanguage, lang != .undetermined else { return hint }
-        if let hint, lang.rawValue != hint {
-            // подписи на иллюстрациях, имена, короткие фразы — язык определяется плохо: считаем языком страницы
-            if letters < 60 || (letters < 160 && !common.contains(base(lang.rawValue))) { return hint }
+        guard let lang = r.dominantLanguage?.rawValue, lang != NLLanguage.undetermined.rawValue else { return hint }
+        guard let hint, !same(lang, hint) else { return lang }
+        let textScript = script(of: text)
+        // «польский» для русского текста с адресами — письменность не совпадает: это ошибка определения
+        if let ls = expectedScript(lang), ls != textScript { return hint }
+        // соседние языки одной письменности (рус/укр/каз/болг) путаются на коротком тексте — верим языку книги
+        if expectedScript(hint) == textScript, letters < 400 { return hint }
+        if letters < 160, !common.contains(base(lang)) { return hint }
+        return lang
+    }
+
+    enum Script { case latin, cyrillic, greek, arabic, hebrew, cjk, other }
+
+    /// Преобладающая письменность текста.
+    static func script(of text: String) -> Script {
+        var c: [Script: Int] = [:]
+        for u in text.unicodeScalars where CharacterSet.letters.contains(u) {
+            let v = u.value
+            let s: Script
+            switch v {
+            case 0x41...0x24F: s = .latin
+            case 0x400...0x52F: s = .cyrillic
+            case 0x370...0x3FF: s = .greek
+            case 0x600...0x6FF: s = .arabic
+            case 0x590...0x5FF: s = .hebrew
+            case 0x3040...0x30FF, 0x4E00...0x9FFF, 0xAC00...0xD7AF: s = .cjk
+            default: s = .other
+            }
+            c[s, default: 0] += 1
         }
-        return lang.rawValue
+        return c.max { $0.value < $1.value }?.key ?? .other
+    }
+
+    /// Письменность языка (для языков, где она однозначна).
+    static func expectedScript(_ code: String) -> Script? {
+        switch base(code) {
+        case "ru", "uk", "be", "bg", "kk", "mk", "mn", "ky", "tg": return .cyrillic
+        case "en", "de", "fr", "es", "it", "pt", "pl", "nl", "cs", "sk", "sl", "hr", "bs", "ro", "hu", "tr", "sv", "da",
+             "nb", "no", "fi", "et", "lv", "lt", "id", "ms", "vi", "ca", "eu", "gl", "ga", "is", "sq": return .latin
+        case "el": return .greek
+        case "ar", "fa", "ur": return .arabic
+        case "he": return .hebrew
+        case "zh", "ja", "ko": return .cjk
+        default: return nil          // сербский пишется и кириллицей, и латиницей
+        }
+    }
+
+    /// Основной язык книги по нескольким страницам: голосование страниц с заметным количеством текста.
+    static func bookLanguage(_ pages: [[String]]) -> String? {
+        var votes: [String: Int] = [:]
+        for units in pages {
+            let text = units.joined(separator: "\n")
+            guard text.unicodeScalars.filter({ CharacterSet.letters.contains($0) }).count >= 300,
+                  let l = detect(text) else { continue }
+            votes[base(l), default: 0] += 1
+        }
+        return votes.max { $0.value < $1.value }?.key
     }
 
     /// Языки, которые встречаются в книгах часто; редкий язык в коротком абзаце — скорее ошибка определения.
@@ -72,7 +127,7 @@ enum TranslationProblem: LocalizedError, Equatable {
             return "Нужно скачать языки для перевода: \(LanguageGuess.title(s)) → \(LanguageGuess.title(t))"
         case .unsupported(let s, let t):
             return "Системный переводчик не знает пару \(LanguageGuess.title(s)) → \(LanguageGuess.title(t)). "
-                + "Скачайте модель Gemma 4 в панели «Перевод»."
+                + "Выберите модель TranslateGemma или Gemma 4 в панели «Перевод»."
         case .failed(let m):
             return "Не удалось перевести: \(m)"
         }
@@ -103,11 +158,9 @@ actor AppleTranslator: TranslationEngine {
     }
 
     func translate(_ texts: [String], from source: String, to target: String) async throws -> [String] {
-        switch await status(from: source, to: target) {
-        case .installed: break
-        case .supported: throw TranslationProblem.needsDownload(source: source, target: target)
-        default: throw TranslationProblem.unsupported(source: source, target: target)
-        }
+        let st = await status(from: source, to: target)
+        // «нужно скачать» система иногда сообщает и для уже установленных пакетов — сначала пробуем перевести
+        guard st == .installed || st == .supported else { throw TranslationProblem.unsupported(source: source, target: target) }
         let key = "\(source)>\(target)"
         let session = sessions[key] ?? TranslationSession(installedSource: Locale.Language(identifier: source),
                                                           target: Locale.Language(identifier: target))
@@ -121,41 +174,67 @@ actor AppleTranslator: TranslationEngine {
         } catch {
             sessions[key] = nil
             if error is CancellationError { throw error }
+            if st == .supported { throw TranslationProblem.needsDownload(source: source, target: target) }
             throw TranslationProblem.failed(error.localizedDescription)
         }
     }
 }
 
-/// Выбор движка: системный переводчик, если он знает пару; иначе локальная модель (если скачана).
+/// Выбор движка по настройке «Модель перевода»: выбранная локальная модель переводит всё;
+/// при системном переводчике — пары, которых у него нет, берёт скачанная локальная модель (если есть).
 enum TranslationRouter {
-    static var fallback: (any TranslationEngine)? { LocalModelTranslator.shared.isInstalled ? LocalModelTranslator.shared : nil }
+    /// Модель, которой реально будет выполнен перевод (выбранная локальная — только если скачана).
+    static var effectiveModel: TranslationModel {
+        let m = TranslationModel.selected
+        return m.isInstalled ? m : .apple
+    }
+
+    /// Папка кеша зависит от модели: переводы разных моделей не смешиваются.
+    static var engineID: String { effectiveModel.rawValue }
+
+    static var fallback: (any TranslationEngine)? {
+        [TranslationModel.gemma4, .translateGemma].first(where: \.isInstalled).map { LocalModelTranslator($0) }
+    }
 
     /// Переводит абзацы: каждый — со своего языка; абзацы на целевом языке и без букв остаются как есть (nil).
-    static func translate(_ texts: [String], to target: String, hint: String? = nil) async throws -> [String?] {
+    /// - Parameters:
+    ///   - hint: основной язык книги (определённый автоматически) — подсказка.
+    ///   - source: язык книги, заданный читателем: все абзацы его письменности считаются на этом языке.
+    static func translate(_ texts: [String], to target: String, hint: String? = nil, source: String? = nil) async throws -> [String?] {
         var out = [String?](repeating: nil, count: texts.count)
-        let page = hint ?? LanguageGuess.detect(texts.joined(separator: "\n"))
+        // язык страницы — с подсказкой «язык книги»: русская страница иначе бывает «украинской»
+        let page = source ?? LanguageGuess.detect(texts.joined(separator: "\n"), hint: hint) ?? hint
         var groups: [String: [Int]] = [:]
         for (i, t) in texts.enumerated() {
-            guard let lang = LanguageGuess.detect(t, hint: page), !LanguageGuess.same(lang, target) else { continue }
+            var lang = LanguageGuess.detect(t, hint: page)
+            if let source, lang != nil, LanguageGuess.expectedScript(source).map({ $0 == LanguageGuess.script(of: t) }) ?? true {
+                lang = source
+            }
+            guard let lang, !LanguageGuess.same(lang, target) else { continue }
             groups[lang, default: []].append(i)
         }
+        let model = effectiveModel
         for (lang, idx) in groups.sorted(by: { $0.value.count > $1.value.count }) {
             try Task.checkCancellation()
             let batch = idx.map { texts[$0] }
             let result: [String]
             do {
-                let apple = await AppleTranslator.shared.status(from: lang, to: target)
-                if apple == .installed || apple == .supported || fallback == nil {
-                    do {
-                        result = try await AppleTranslator.shared.translate(batch, from: lang, to: target)
-                    } catch TranslationProblem.unsupported(let s, let t) {
-                        guard let f = fallback else { throw TranslationProblem.unsupported(source: s, target: t) }
-                        result = try await f.translate(batch, from: lang, to: target)
-                    }
-                } else if let f = fallback {
-                    result = try await f.translate(batch, from: lang, to: target)
+                if model.isLocal {
+                    result = try await LocalModelTranslator(model).translate(batch, from: lang, to: target)
                 } else {
-                    throw TranslationProblem.unsupported(source: lang, target: target)
+                    let apple = await AppleTranslator.shared.status(from: lang, to: target)
+                    if apple == .installed || apple == .supported || fallback == nil {
+                        do {
+                            result = try await AppleTranslator.shared.translate(batch, from: lang, to: target)
+                        } catch TranslationProblem.unsupported(let s, let t) {
+                            guard let f = fallback else { throw TranslationProblem.unsupported(source: s, target: t) }
+                            result = try await f.translate(batch, from: lang, to: target)
+                        }
+                    } else if let f = fallback {
+                        result = try await f.translate(batch, from: lang, to: target)
+                    } else {
+                        throw TranslationProblem.unsupported(source: lang, target: target)
+                    }
                 }
             } catch let p as TranslationProblem {
                 // другой язык отдельных абзацев (нет пары, не скачаны языки) не мешает переводу страницы:
@@ -282,7 +361,7 @@ enum PageText {
 
 // MARK: - кеш переводов рядом с книгой
 
-/// Переводы страниц: `.scanreader/<книга>/translations/<язык>/page-N.json` (синхронизируется через iCloud).
+/// Переводы страниц: `.scanreader/<книга>/translations/<модель>/<язык>/page-N.json` (синхронизируется через iCloud).
 struct TranslationStore {
     struct Entry: Codable, Equatable {
         var source: String          // отпечаток исходного текста
@@ -292,15 +371,15 @@ struct TranslationStore {
 
     let dir: URL
 
-    init(book: URL, target: String) {
+    init(book: URL, target: String, engine: String = TranslationRouter.engineID) {
         let fm = FileManager.default
-        let side = Sidecar.dir(for: book).appendingPathComponent("translations/\(target)", isDirectory: true)
+        let side = Sidecar.dir(for: book).appendingPathComponent("translations/\(engine)/\(target)", isDirectory: true)
         if (try? fm.createDirectory(at: side, withIntermediateDirectories: true)) != nil, fm.isWritableFile(atPath: side.path) {
             dir = side
         } else {
             let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             let h = SHA256.hash(data: Data(book.path.utf8)).map { String(format: "%02x", $0) }.joined().prefix(12)
-            dir = base.appendingPathComponent("\(Product.dataFolder)/translations/\(book.lastPathComponent)-\(h)/\(target)", isDirectory: true)
+            dir = base.appendingPathComponent("\(Product.dataFolder)/translations/\(book.lastPathComponent)-\(h)/\(engine)/\(target)", isDirectory: true)
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         }
     }

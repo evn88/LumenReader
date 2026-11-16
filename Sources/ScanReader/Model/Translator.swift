@@ -37,10 +37,38 @@ final class Translator: ObservableObject {
     }
 
     private var store: TranslationStore
+    /// Язык книги, заданный читателем (nil — определять автоматически).
+    @Published var sourceLanguage: String? {
+        didSet { if sourceLanguage != oldValue { syncMeta(); sourceChanged() } }
+    }
+    /// Основной язык книги по распознанным страницам — подсказка для определения языка страниц.
+    var detectedLanguage: String? {
+        if let autoLanguage { return autoLanguage }
+        let cached = book.cached.sorted()
+        guard cached.count >= 3 else { return nil }
+        let step = max(1, cached.count / 30)
+        let sample = stride(from: 0, to: cached.count, by: step).prefix(30).compactMap { book.layoutIfKnown(cached[$0]) }
+        autoLanguage = LanguageGuess.bookLanguage(sample.map(PageText.units))
+        return autoLanguage
+    }
+    private var autoLanguage: String?
+
+    /// Отпечаток для кеша: текст страницы и язык книги, заданный читателем.
+    private func fingerprint(_ units: [String]) -> String { PageText.fingerprint(units + [sourceLanguage ?? ""]) }
+
+    private func sourceChanged() {
+        for t in inFlight.values { t.cancel() }
+        inFlight = [:]
+        pages = [:]; problems = [:]; memo = [:]; pendingDownload = nil
+        done = []
+        if wholeBook { job?.cancel(); job = nil; startBook() }
+        requestVisible()
+    }
     private var inFlight: [Int: Task<Void, Never>] = [:]
     private var visible: [Int] = []
     private var job: Task<Void, Never>?
     private var sink: AnyCancellable?
+    private var modelSink: AnyCancellable?
 
     init(book: BookModel, target: String) {
         self.book = book
@@ -54,9 +82,13 @@ final class Translator: ObservableObject {
                 store = TranslationStore(book: book.url, target: lang)
                 done = Set(store.keys().compactMap(Self.page))
             }
+            sourceLanguage = t.source
             showing = t.showing ?? false
             if t.wholeBook == true { startBook() }
         }
+        // сменили модель перевода (здесь или в настройках) — переводы другой модели в своей папке
+        modelSink = NotificationCenter.default.publisher(for: TranslationModel.changed).receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.retarget() }
         // новые распознанные страницы: если перевод включён и они на экране — переводим
         sink = book.$cached.dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in
             DispatchQueue.main.async { self?.requestVisible() }
@@ -69,8 +101,8 @@ final class Translator: ObservableObject {
     var progressText: String { "Переведено \(min(done.count, book.count)) из \(book.count)" }
 
     private func syncMeta() {
-        let s = showing, w = wholeBook, t = target
-        Sidecar.update(book.url) { $0.translation = TranslationMeta(target: t, showing: s, wholeBook: w) }
+        let s = showing, w = wholeBook, t = target, src = sourceLanguage
+        Sidecar.update(book.url) { $0.translation = TranslationMeta(target: t, showing: s, wholeBook: w, source: src) }
     }
 
     private func retarget() {
@@ -140,14 +172,15 @@ final class Translator: ObservableObject {
     func request(_ i: Int) {
         guard pages[i] == nil, inFlight[i] == nil, problems[i] == nil, let layout = book.layoutIfKnown(i) else { return }
         let units = PageText.units(layout)
-        let fp = PageText.fingerprint(units), store = self.store, k = key(i), target = self.target
+        let fp = fingerprint(units), store = self.store, k = key(i), target = self.target
+        let hint = detectedLanguage, source = sourceLanguage
         inFlight[i] = Task { [weak self] in
             let result: Result<[String?], Error>
             if let e = store.load(k), e.source == fp, e.units.count == units.count {
                 result = .success(e.units)
             } else {
                 do {
-                    let t = try await TranslationRouter.translate(units, to: target)
+                    let t = try await TranslationRouter.translate(units, to: target, hint: hint, source: source)
                     store.save(.init(source: fp, units: t, engine: nil), k)
                     result = .success(t)
                 } catch { result = .failure(error) }
@@ -214,10 +247,10 @@ final class Translator: ObservableObject {
             bookPause = nil
             bookPage = i
             let units = PageText.units(layout)
-            let fp = PageText.fingerprint(units)
+            let fp = fingerprint(units)
             if let e = store.load(key(i)), e.source == fp { done.insert(i); continue }
             do {
-                let t = try await TranslationRouter.translate(units, to: target)
+                let t = try await TranslationRouter.translate(units, to: target, hint: detectedLanguage, source: sourceLanguage)
                 guard !Task.isCancelled else { return }
                 store.save(.init(source: fp, units: t, engine: nil), key(i))
                 done.insert(i)
@@ -227,6 +260,8 @@ final class Translator: ObservableObject {
             } catch let p as TranslationProblem {
                 bookPage = nil
                 switch p {
+                case .needsDownload(let s, _) where (sourceLanguage ?? detectedLanguage).map({ !LanguageGuess.same($0, s) }) ?? false:
+                    done.insert(i)       // страница на другом языке, пакета для него нет — пропускаем, книга идёт дальше
                 case .needsDownload: pendingDownload = p; bookPause = "нужно скачать языки"; job = nil; return
                 case .unsupported(let s, _):
                     bookPause = "язык «\(LanguageGuess.title(s))» не поддерживается"
@@ -256,4 +291,6 @@ struct TranslationMeta: Codable, Equatable {
     var target: String?
     var showing: Bool?
     var wholeBook: Bool?
+    /// Язык книги, заданный читателем (если автоматическое определение ошиблось).
+    var source: String?
 }

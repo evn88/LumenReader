@@ -70,6 +70,26 @@ struct ScanReaderApp: App {
             LlamaRunner.shared.shutdown()
             exit(0)
         }
+        //   ScanReader --detect-lang <книга> — язык каждой распознанной страницы (проверка определения языка)
+        if let i = args.firstIndex(of: "--detect-lang"), args.count > i + 1 {
+            let url = URL(fileURLWithPath: args[i + 1])
+            let cache = LayoutCache(bookURL: url, palette: .original, languages: ["ru-RU", "en-US"])
+            var counts: [String: Int] = [:]
+            let all = (0..<2000).filter { cache.has($0) }.compactMap { p in cache.load(p).map { (p, PageText.units($0)) } }
+            let book = LanguageGuess.bookLanguage(all.prefix(30).map(\.1))
+            print("Язык книги:", book ?? "—")
+            for (p, units) in all {
+                let page = LanguageGuess.detect(units.joined(separator: "\n"), hint: book) ?? "—"
+                counts[page, default: 0] += 1
+                let odd = units.compactMap { u -> String? in
+                    guard let g = LanguageGuess.detect(u, hint: page), !LanguageGuess.same(g, page) else { return nil }
+                    return "[\(g)] \(u.prefix(70))"
+                }
+                if page != book || !odd.isEmpty { print("стр. \(p + 1): \(page)  " + odd.prefix(3).joined(separator: " | ")) }
+            }
+            print("Итого:", counts)
+            exit(0)
+        }
         //   ScanReader --import-apple-books --dry-run          — что будет импортировано (только числа)
         //   ScanReader --import-apple-books --to <папка>       — копирование своих PDF/EPUB
         if args.contains("--import-apple-books") {

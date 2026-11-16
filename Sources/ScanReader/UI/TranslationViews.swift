@@ -30,6 +30,18 @@ struct TranslationPanel<T: BookTranslating>: View {
                 .labelsHidden().pickerStyle(.menu).fixedSize().focusable(false)
             }
 
+            HStack {
+                Text("Язык книги").font(.system(size: 12))
+                Spacer()
+                Picker("Язык книги", selection: $translator.sourceLanguage) {
+                    Text(translator.detectedLanguage.map { "Автоматически (\(LanguageGuess.title($0)))" } ?? "Автоматически")
+                        .tag(String?.none)
+                    Divider()
+                    ForEach(TranslationTarget.sources) { Text($0.title).tag(Optional($0.code)) }
+                }
+                .labelsHidden().pickerStyle(.menu).fixedSize().focusable(false)
+            }
+
             if let p = translator.pendingDownload {
                 VStack(alignment: .leading, spacing: 6) {
                     Label(p.localizedDescription, systemImage: "arrow.down.circle")
@@ -68,15 +80,16 @@ struct TranslationPanel<T: BookTranslating>: View {
 
             Divider()
 
-            LocalModelSection()
-                .onChange(of: models.state) { _, s in if s == .installed { translator.languagesInstalled() } }
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Модель перевода").font(.system(size: 12, weight: .semibold))
+                ModelChooser(compact: true)
+            }
+            .onChange(of: models.states.values.filter { $0 == .installed }.count) { _, _ in translator.languagesInstalled() }
 
             Divider()
 
             VStack(alignment: .leading, spacing: 4) {
-                Label(models.state == .installed
-                      ? "Переводят системный переводчик Apple и Gemma 4, текст не покидает Mac"
-                      : "Переводит системный переводчик Apple, текст не покидает Mac", systemImage: "lock")
+                Label("Перевод выполняется на этом Mac, текст никуда не отправляется", systemImage: "lock")
                     .fixedSize(horizontal: false, vertical: true)
                 Label("Чтобы перевести фрагмент, выделите его", systemImage: "character.cursor.ibeam")
             }
@@ -182,38 +195,97 @@ struct TranslationDownloader<T: BookTranslating>: ViewModifier {
     }
 }
 
-/// Локальная модель Gemma 4: скачать, прогресс, удалить.
-struct LocalModelSection: View {
+/// Выбор модели перевода: системный переводчик Apple, TranslateGemma 4B или Gemma 4 E4B.
+/// Перед скачиванием — предупреждение с размером модели и свободным местом на диске.
+struct ModelChooser: View {
     @ObservedObject private var store = LocalModelStore.shared
     @Environment(\.colorScheme) private var scheme
+    @State private var confirm: TranslationModel?
+    var compact = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Другие языки").font(.system(size: 12, weight: .semibold))
-            switch store.state {
-            case .installed:
-                Label("Модель Gemma 4 скачана", systemImage: "checkmark.circle")
-                    .font(.system(size: 12)).foregroundStyle(Brand.amberText(scheme))
-                Text("Переводит языки, которых нет у системного переводчика: сербский, чешский, хорватский и другие.")
-                    .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                Button("Удалить модель", role: .destructive) { store.remove() }.controlSize(.small).tint(.red)
-            case .downloading(let p):
-                ProgressView(value: p).progressViewStyle(.linear).tint(Brand.amber)
-                HStack {
-                    Text("Скачано \(Int(p * 100))% из 5,2 ГБ").font(.system(size: 11)).foregroundStyle(.secondary).monospacedDigit()
-                    Spacer()
-                    Button("Отменить") { store.cancel() }.controlSize(.small)
+        VStack(alignment: .leading, spacing: compact ? 6 : 10) {
+            ForEach(TranslationModel.allCases) { m in row(m) }
+        }
+        .confirmationDialog(confirm.map { "Скачать модель «\($0.title)»?" } ?? "",
+                            isPresented: Binding(get: { confirm != nil }, set: { if !$0 { confirm = nil } }),
+                            presenting: confirm) { m in
+            Button("Скачать \(m.sizeText)") { store.download(m) }
+            Button("Отмена", role: .cancel) {}
+        } message: { m in
+            Text(warning(m))
+        }
+    }
+
+    private func warning(_ m: TranslationModel) -> String {
+        var t = "С сайта Hugging Face будет загружено \(m.sizeText). Модель хранится на этом Mac и переводит без интернета."
+        if let free = store.freeSpace {
+            let freeText = ByteCountFormatter.string(fromByteCount: free, countStyle: .file)
+            t += free < m.approximateSize + 1_000_000_000
+                ? " Свободно на диске только \(freeText) — может не хватить места."
+                : " Свободно на диске: \(freeText)."
+        }
+        return t
+    }
+
+    @ViewBuilder
+    private func row(_ m: TranslationModel) -> some View {
+        let state = store.state(m)
+        let chosen = store.selected == m
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: chosen ? "largecircle.fill.circle" : "circle")
+                .font(.system(size: 13))
+                .foregroundStyle(chosen ? Brand.amberText(scheme) : .secondary)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(m.title).font(.system(size: 12, weight: chosen ? .semibold : .regular))
+                    Text(m.sizeText).font(.system(size: 10)).foregroundStyle(.secondary)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Capsule().fill(Color.primary.opacity(0.06)))
                 }
-            case .notInstalled, .failed:
-                if case .failed(let m) = store.state {
-                    Label(m, systemImage: "exclamationmark.triangle").font(.system(size: 11)).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                Text(m.summary).font(.system(size: 11)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                switch state {
+                case .downloading(let p):
+                    HStack(spacing: 8) {
+                        ProgressView(value: p).progressViewStyle(.linear).tint(Brand.amber)
+                        Text("\(Int(p * 100))%").font(.system(size: 10)).foregroundStyle(.secondary).monospacedDigit()
+                        Button("Отменить") { store.cancel() }.controlSize(.mini)
+                    }
+                case .failed(let msg):
+                    Text(msg).font(.system(size: 10)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                case .installed where m.isLocal:
+                    Button("Удалить модель", role: .destructive) { store.remove(m) }
+                        .buttonStyle(.plain).foregroundStyle(.red).font(.system(size: 10))
+                default:
+                    EmptyView()
                 }
-                Text("Для сербского, чешского, хорватского и ещё десятков языков нужна локальная модель Gemma 4 от Google (5,2 ГБ).")
-                    .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                Button { store.download() } label: { Label("Скачать модель", systemImage: "arrow.down.circle") }
-                    .controlSize(.small)
             }
+            Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { choose(m) }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(chosen ? [.isButton, .isSelected] : .isButton)
+    }
+
+    private func choose(_ m: TranslationModel) {
+        switch store.state(m) {
+        case .installed: store.selected = m
+        case .downloading: break
+        case .notInstalled, .failed: if !store.isBusy { confirm = m }
+        }
+    }
+}
+
+/// Раздел «Перевод» в настройках приложения.
+struct TranslationSettingsSection: View {
+    var body: some View {
+        Section("Модель перевода") {
+            ModelChooser()
+            Text("Перевод выполняется на этом Mac. Чем крупнее модель, тем точнее перевод и тем медленнее он идёт.")
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 }

@@ -60,6 +60,13 @@ final class TranslationTests: XCTestCase {
         // короткая подпись — язык страницы, а не случайная догадка
         XCTAssertEqual(LanguageGuess.detect("Offices People", hint: "ru"), "ru")
         XCTAssertNil(LanguageGuess.detect("42"))
+        // соседние языки одной письменности на коротком тексте — язык книги, а не украинский/казахский
+        XCTAssertEqual(LanguageGuess.detect("Глава 3. Хуки и состояние компонента", hint: "ru"), "ru")
+        XCTAssertEqual(LanguageGuess.detect("Рис. 2.4. По умолчанию компонент OldAbout отображает подробную информацию о людях", hint: "ru"), "ru")
+        // настоящий английский абзац в русской книге остаётся английским (другая письменность)
+        XCTAssertEqual(LanguageGuess.detect("Welcome to your new Gatsby site. Now go build something great with React.", hint: "ru"), "en")
+        XCTAssertEqual(LanguageGuess.script(of: "Привет, world"), .cyrillic)
+        XCTAssertEqual(LanguageGuess.bookLanguage([[String(repeating: "Когда пользователь щелкнет по одной из вкладок, обновляется переменная. ", count: 6)]]), "ru")
         XCTAssertTrue(LanguageGuess.same("en-US", "en"))
         XCTAssertFalse(LanguageGuess.same("sr", "ru"))
     }
@@ -70,8 +77,9 @@ final class TranslationTests: XCTestCase {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let book = dir.appendingPathComponent("book.pdf")
-        let store = TranslationStore(book: book, target: "en")
-        XCTAssertTrue(store.dir.path.contains(".scanreader/book.pdf/translations/en"))
+        let store = TranslationStore(book: book, target: "en", engine: "apple")
+        XCTAssertTrue(store.dir.path.contains(".scanreader/book.pdf/translations/apple/en"))
+        XCTAssertNotEqual(TranslationStore(book: book, target: "en", engine: "gemma4").dir, store.dir, "модели не делят кеш")
         let units = ["Привет", "мир"]
         let e = TranslationStore.Entry(source: PageText.fingerprint(units), units: ["Hello", nil], engine: nil)
         store.save(e, "page-3")

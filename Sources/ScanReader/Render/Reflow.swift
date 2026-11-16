@@ -123,7 +123,8 @@ enum Reflow {
                     guard !run.isEmpty else { return }
                     let (str, align, indent) = attributed(run, paragraph: p, colLeft: colL0, palette: palette, ink: ink,
                                                           settings: settings, indentFirst: first)
-                    for t in typeset(str, width: colW, align: align, firstIndent: indent) {
+                    // отступ первой строки не больше 40% колонки: подпись у правого края иначе рвёт слово («Offi|ces»)
+                    for t in typeset(str, width: colW, align: align, firstIndent: min(indent, colW * 0.4)) {
                         if y + t.baseline + t.descent > bottom, y > top { newPage() }
                         add(.text(t.line, origin: CGPoint(x: colL + t.x, y: y + t.baseline)))
                         pages[pages.count - 1].lineTexts.append(t.text)
