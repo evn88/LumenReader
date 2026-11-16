@@ -31,6 +31,10 @@ struct ScreenPage {
         case runningLine(paragraph: Int, line: Int)
         /// Строка с низкой уверенностью OCR: фрагмент оригинала (глобальный индекс строки).
         case fallback(line: Int, rect: CGRect)
+        /// Точки-заполнители оглавления от x0 до x1 на базовой линии.
+        case leader(from: CGFloat, to: CGFloat, baseline: CGFloat, family: FontFamily, size: CGFloat, grid: CGFloat)
+        /// Фрагмент скана на месте структуры, которую не удалось воссоздать (индекс layout.scanRegions).
+        case scan(index: Int, rect: CGRect)
     }
     var items: [Item] = []
     /// Текст каждой строки перекомпоновки (копирование, поиск, тесты).
@@ -46,7 +50,9 @@ enum Reflow {
         case code(Int)
         case figure(Int)
         case rule(CGRect)
-        var key: Int { switch self { case .paragraph: 0; case .code: 1; case .figure: 2; case .rule: 3 } }
+        case toc(Int)
+        case table(Int)
+        case scan(Int)
     }
 
     /// - Parameters:
@@ -54,6 +60,8 @@ enum Reflow {
     ///   - carryOut: начало следующей страницы, если последнее слово этой оборвано переносом.
     static func paginate(_ layout: PageLayout, palette: FontPalette, ink: CGColor, isDark: Bool,
                          settings: ReflowSettings, carryIn: Bool = false, carryOut: String? = nil) -> [ScreenPage] {
+        // строки оглавлений и таблиц идут в allLines после строк абзацев исходной раскладки
+        let structureLineStart = layout.paragraphs.reduce(0) { $0 + $1.lines.count }
         let layout = prepare(layout, carryIn: carryIn, carryOut: carryOut)
         let W = layout.size.width, H = layout.size.height, s = settings.scale
 
@@ -75,15 +83,29 @@ enum Reflow {
         for (i, c) in layout.codeBlocks.enumerated() { blocks.append((c.bounds, .code(i))) }
         for (i, f) in layout.figures.enumerated() { blocks.append((f, .figure(i))) }
         for r in layout.rules where r != topRule { blocks.append((r, .rule(r))) }
-        blocks.sort { $0.0.minY < $1.0.minY }
+        for (i, t) in layout.tocBlocks.enumerated() { blocks.append((t.bounds, .toc(i))) }
+        for (i, t) in layout.tables.enumerated() { blocks.append((t.bounds, .table(i))) }
+        for (i, r) in layout.scanRegions.enumerated() { blocks.append((r.rect, .scan(i))) }
+        // порядок чтения: в многоколоночной зоне — колонка за колонкой
+        blocks.sort { layout.readingKey($0.0) < layout.readingKey($1.0) }
 
-        // 3. Колонка и поля.
-        let body = layout.paragraphs.enumerated().filter { !running.contains($0.offset) }.flatMap { $0.element.lines }
+        // 3. Колонка и поля (строки многоколоночных зон не в счёт: колонка экрана — во всю ширину набора).
+        let inZone = { (l: TextLine) in layout.columnZones.contains { $0.rect.contains(CGPoint(x: l.bounds.midX, y: l.bounds.midY)) } }
+        var body = layout.paragraphs.enumerated().filter { !running.contains($0.offset) }.flatMap { $0.element.lines }
+        if body.contains(where: { !inZone($0) }) && body.filter({ !inZone($0) }).count >= 3 { body = body.filter { !inZone($0) } }
+        else if !layout.columnZones.isEmpty {
+            // вся страница в колонках: края набора — края зоны
+            let z = layout.columnZones.map(\.rect).reduce(layout.columnZones[0].rect) { $0.union($1) }
+            body = [TextLine(bounds: z, baseline: z.maxY, xHeight: 10, alignment: .left, confidence: 1, words: [])]
+        }
         let lefts = body.map(\.bounds.minX).sorted(), rights = body.map(\.bounds.maxX).sorted()
-        let colL0 = lefts.isEmpty ? W * 0.08 : lefts[lefts.count / 2]
+        // оглавления и таблицы — тоже набор: колонка не уже их
+        let structureRects = layout.tocBlocks.map(\.bounds) + layout.tables.map(\.bounds)
+        var colL0 = lefts.isEmpty ? W * 0.08 : lefts[lefts.count / 2]
+        if let m = structureRects.map(\.minX).min() { colL0 = lefts.isEmpty ? m : min(colL0, m) }
         var colR0 = rights.isEmpty ? W * 0.92 : rights[min(rights.count - 1, Int(Double(rights.count) * 0.9))]
         // код в книгах часто шире прозы: колонка — по самому широкому из них
-        colR0 = max(colR0, layout.codeBlocks.map(\.bounds.maxX).max() ?? 0)
+        colR0 = max(colR0, (layout.codeBlocks.map(\.bounds) + structureRects).map(\.maxX).max() ?? 0)
         let colL = colL0 * settings.margins, colR = W - (W - colR0) * settings.margins
         let colW = max(W * 0.3, colR - colL)
         let headBottom = topRule.map { $0.maxY } ?? 0
@@ -111,6 +133,15 @@ enum Reflow {
             switch block {
             case .paragraph(let pi):
                 let p = layout.paragraphs[pi]
+                // левый край для абзацного отступа: в колонке многоколоночной зоны — край этой колонки
+                var paraLeft = colL0
+                if let z = layout.columnZones.first(where: { $0.rect.contains(CGPoint(x: rect.midX, y: rect.midY)) }) {
+                    let col = z.column(of: rect)
+                    let same = layout.paragraphs.flatMap(\.lines).filter {
+                        z.rect.contains(CGPoint(x: $0.bounds.midX, y: $0.bounds.midY)) && z.column(of: $0.bounds) == col
+                    }
+                    paraLeft = same.map(\.bounds.minX).sorted().dropFirst(same.count / 2).first ?? colL0
+                }
                 let pitches = zip(p.lines.dropFirst(), p.lines).map { $0.baseline - $1.baseline }.filter { $0 > 0 }.sorted()
                 let pitch = pitches.isEmpty ? p.fontSize * 1.25 : pitches[pitches.count / 2]
                 let lh = pitch * s * settings.lineSpacing
@@ -121,7 +152,7 @@ enum Reflow {
                 var runStartsParagraph = true      // false — продолжение после фрагмента оригинала
                 func flushRun(first: Bool) {
                     guard !run.isEmpty else { return }
-                    let (str, align, indent) = attributed(run, paragraph: p, colLeft: colL0, palette: palette, ink: ink,
+                    let (str, align, indent) = attributed(run, paragraph: p, colLeft: paraLeft, palette: palette, ink: ink,
                                                           settings: settings, indentFirst: first)
                     // отступ первой строки не больше 40% колонки: подпись у правого края иначе рвёт слово («Offi|ces»)
                     for t in typeset(str, width: colW, align: align, firstIndent: min(indent, colW * 0.4)) {
@@ -227,6 +258,131 @@ enum Reflow {
                 y += pad - lh * 0.75
                 prevBottom = rect.maxY
 
+            case .toc(let ti):
+                let toc = layout.tocBlocks[ti]
+                var lineIndex = structureLineStart + layout.tocBlocks[..<ti].reduce(0) { $0 + $1.entries.reduce(0) { $0 + $1.allLines.count } }
+                var prevEntryBottom: CGFloat?
+                for e in toc.entries {
+                    let size = e.fontSize * s
+                    let pitches = toc.entries.flatMap(\.lines).map(\.bounds.height).sorted()
+                    let lh = max(size * 1.25, (pitches.isEmpty ? size : pitches[pitches.count / 2]) * s * 1.2) * settings.lineSpacing
+                    let entryRect = e.allLines.map(\.bounds).reduce(e.allLines[0].bounds) { $0.union($1) }
+                    if let pb = prevEntryBottom { y += min(max(0, entryRect.minY - pb) * s, lh * 1.4) } else { y += gapBefore(rect, lineHeight: lh) }
+                    prevEntryBottom = entryRect.maxY
+                    if y + lh > bottom, y > top { newPage() }
+                    // номер страницы
+                    var numberLine: CTLine?, nw: CGFloat = 0
+                    if let p = e.page {
+                        let str = wordsString(p.words, family: e.family, size: size, palette: palette, ink: ink)
+                        let l = CTLineCreateWithAttributedString(str)
+                        numberLine = l; nw = TextMetrics.advance(l)
+                    }
+                    let indent = min((e.lines[0].bounds.minX - toc.bounds.minX) * s, colW * 0.25)
+                    let hang = size
+                    let avail = colW - indent - (numberLine != nil ? nw + size * 1.6 : 0)
+                    let title = wordsString(e.lines.flatMap(\.words), family: e.family, size: size, palette: palette, ink: ink)
+                    let typeset = Self.typeset(title, width: max(size * 4, avail - hang), align: .natural, firstIndent: -hang)
+                    var lastEnd = colL + indent, lastBaseline = y
+                    for t in typeset {
+                        if y + lh > bottom, y > top { newPage() }
+                        let x = colL + indent + hang + t.x
+                        add(.text(t.line, origin: CGPoint(x: x, y: y + t.baseline)))
+                        pages[pages.count - 1].lineTexts.append(t.text)
+                        pages[pages.count - 1].wordBoxes += t.words.map { w in (w.0, CGRect(x: x + w.1, y: y, width: max(1, w.2 - w.1), height: lh)) }
+                        lastEnd = x + TextMetrics.advance(t.line) - CGFloat(CTLineGetTrailingWhitespaceWidth(t.line))
+                        lastBaseline = y + t.baseline
+                        y += lh
+                    }
+                    lineIndex += e.lines.count
+                    if let numberLine, let p = e.page {
+                        var nx = colL + colW - nw
+                        if p.confidence < AnalyzedPage.minConfidence {
+                            // нечитаемый номер — фрагментом скана, в масштабе текста
+                            let k = size / max(e.fontSize, 1)
+                            let r = p.bounds.insetBy(dx: -3, dy: -3)
+                            nx = colL + colW - r.width * k
+                            add(.fallback(line: lineIndex,
+                                          rect: CGRect(x: nx, y: lastBaseline - (p.baseline - r.minY) * k, width: r.width * k, height: r.height * k)))
+                        } else {
+                            add(.text(numberLine, origin: CGPoint(x: nx, y: lastBaseline)))
+                        }
+                        if let g = p.words.first?.gid {
+                            pages[pages.count - 1].wordBoxes.append((g, CGRect(x: nx, y: lastBaseline - lh * 0.8, width: nw, height: lh)))
+                        }
+                        if e.leader {
+                            add(.leader(from: lastEnd, to: nx, baseline: lastBaseline, family: e.family, size: size, grid: colL))
+                        }
+                        lineIndex += 1
+                    }
+                }
+                prevBottom = rect.maxY
+
+            case .table(let ti):
+                let t = layout.tables[ti]
+                let tw = t.columns.last! - t.columns.first!
+                // таблица масштабируется целиком (как картинка), но не шире колонки
+                let k = min(s, colW / max(tw, 1))
+                let ox = colL + min(max(0, (t.columns.first! - colL0) * k), max(0, colW - tw * k))
+                y += gapBefore(rect, lineHeight: t.fontSize * k * 1.3)
+                var lineIndex = structureLineStart + layout.tocBlocks.reduce(0) { $0 + $1.entries.reduce(0) { $0 + $1.allLines.count } }
+                    + layout.tables[..<ti].reduce(0) { $0 + $1.cells.reduce(0) { $0 + $1.lines.count } }
+                var cellStart: [Int] = []
+                for c in t.cells { cellStart.append(lineIndex); lineIndex += c.lines.count }
+                let rw = max(1, t.ruleWidth * k)
+                for r in 0..<(t.rows.count - 1) {
+                    let rowTop = t.rows[r], rowH = (t.rows[r + 1] - rowTop) * k
+                    if y + rowH > bottom, y > top { newPage() }
+                    func X(_ x: CGFloat) -> CGFloat { ox + (x - t.columns.first!) * k }
+                    func Y(_ yy: CGFloat) -> CGFloat { y + (yy - rowTop) * k }
+                    if t.ruled {
+                        add(.rule(CGRect(x: X(t.columns.first!) - rw / 2, y: y - rw / 2, width: tw * k + rw, height: rw)))
+                        add(.rule(CGRect(x: X(t.columns.first!) - rw / 2, y: y + rowH - rw / 2, width: tw * k + rw, height: rw)))
+                        for g in t.gridRules where g.width < g.height && abs(g.minY - rowTop) < 2 {
+                            add(.rule(CGRect(x: X(g.midX) - rw / 2, y: y, width: rw, height: rowH)))
+                        }
+                    }
+                    for (ci, cell) in t.cells.enumerated() where cell.row == r {
+                        for (li, l) in cell.lines.enumerated() {
+                            let gi = cellStart[ci] + li
+                            let box = CGRect(x: X(l.bounds.minX), y: Y(l.bounds.minY), width: l.bounds.width * k, height: l.bounds.height * k)
+                            if l.confidence < AnalyzedPage.minConfidence {
+                                add(.fallback(line: gi, rect: box.insetBy(dx: -3 * k, dy: -3 * k)))
+                                continue
+                            }
+                            let str = wordsString(l.words, family: t.family, size: t.fontSize * k, palette: palette, ink: ink)
+                            let ct = CTLineCreateWithAttributedString(str)
+                            let w = TextMetrics.advance(ct)
+                            let x: CGFloat
+                            switch l.alignment {
+                            case .right: x = box.maxX - w
+                            case .center: x = box.midX - w / 2
+                            default: x = box.minX
+                            }
+                            let base = Y(l.baseline)
+                            add(.text(ct, origin: CGPoint(x: x, y: base)))
+                            pages[pages.count - 1].lineTexts.append(l.text)
+                            str.enumerateAttribute(wordKey, in: NSRange(location: 0, length: str.length)) { v, range, _ in
+                                guard let gid = v as? Int else { return }
+                                let x0 = CTLineGetOffsetForStringIndex(ct, range.location, nil)
+                                let x1 = CTLineGetOffsetForStringIndex(ct, range.location + range.length, nil)
+                                pages[pages.count - 1].wordBoxes.append((gid, CGRect(x: x + x0, y: box.minY, width: max(1, x1 - x0), height: box.height)))
+                            }
+                        }
+                    }
+                    y += rowH
+                }
+                prevBottom = rect.maxY
+
+            case .scan(let si):
+                let r = layout.scanRegions[si].rect
+                var w = r.width * s, h = r.height * s
+                if w > colW { h *= colW / w; w = colW }
+                y += gapBefore(rect, lineHeight: 20 * s)
+                if y + h > bottom, y > top { newPage() }
+                add(.scan(index: si, rect: CGRect(x: colL + min(max(0, (r.minX - colL0) * s), colW - w), y: y, width: w, height: h)))
+                y += h
+                prevBottom = rect.maxY
+
             case .figure(let fi):
                 let f = layout.figures[fi]
                 var w = f.width * s, h = f.height * s
@@ -273,12 +429,7 @@ enum Reflow {
     /// посреди перенесённого слова, и переносы через границу страниц.
     static func prepare(_ layout: PageLayout, carryIn: Bool, carryOut: String?) -> PageLayout {
         var l = layout
-        var gid = 0
-        for pi in l.paragraphs.indices {
-            for li in l.paragraphs[pi].lines.indices {
-                for wi in l.paragraphs[pi].lines[li].words.indices { l.paragraphs[pi].lines[li].words[wi].gid = gid; gid += 1 }
-            }
-        }
+        l.numberWords()
         // абзац, оборванный на «Единствен-», и следующий, начинающийся со строчной, — один абзац
         var merged: [Paragraph] = []
         for p in l.paragraphs {
@@ -333,6 +484,20 @@ enum Reflow {
             .lines.first?.words.first?.text
     }
 
+    /// Слова одной строкой (начертания слов, сквозные номера для выделения).
+    static func wordsString(_ words: [Word], family: FontFamily, size: CGFloat, palette: FontPalette, ink: CGColor) -> NSAttributedString {
+        let out = NSMutableAttributedString()
+        let fg = NSAttributedString.Key(kCTForegroundColorAttributeName as String)
+        let fk = NSAttributedString.Key(kCTFontAttributeName as String)
+        for (i, w) in words.enumerated() {
+            if i > 0 { out.append(NSAttributedString(string: " ", attributes: [fk: palette.font(family, bold: false, italic: false, size: size), fg: ink])) }
+            var attrs: [NSAttributedString.Key: Any] = [fk: palette.font(family, bold: w.bold, italic: w.italic, size: size), fg: ink]
+            if let gid = w.gid { attrs[wordKey] = gid }
+            out.append(NSAttributedString(string: w.text, attributes: attrs))
+        }
+        return out
+    }
+
     enum Align { case natural, justified, center, right }
 
     /// Абзац как строка CoreText: начертания слов, кегль × масштаб; выравнивание и отступ первой строки.
@@ -381,7 +546,7 @@ enum Reflow {
     /// Разбивка абзаца на строки: CTTypesetter + переносы по словарю системы
     /// (CFStringGetHyphenationLocationBeforeIndex) + выключка CTLineCreateJustifiedLine.
     /// Возвращает строку, смещение базовой линии от верха строки, descent и x-сдвиг.
-    private static func typeset(_ str: NSAttributedString, width: CGFloat, align: Align,
+    static func typeset(_ str: NSAttributedString, width: CGFloat, align: Align,
                                 firstIndent: CGFloat)
         -> [(line: CTLine, baseline: CGFloat, descent: CGFloat, x: CGFloat, text: String, words: [(Int, CGFloat, CGFloat)])] {
         let ns = str.string as NSString

@@ -41,6 +41,9 @@ enum CodeDetector {
         let density = symbolDensity(text)
         let mono = p.family == .mono || pitchVariation(p.lines) < 0.045
         let lang = detectLanguage(text)
+        // короткая строка из нескольких слов («Таблица 2.2. Языки») — моноширинность по трём словам случайна
+        let short = p.lines.count == 1 && p.lines[0].words.count < 6
+        if short && lang.score < 3 && density <= 0.15 { return false }
         return (mono && (density > 0.04 || lang.score >= 3)) || density > 0.12 || (density > 0.07 && lang.score >= 3)
     }
 

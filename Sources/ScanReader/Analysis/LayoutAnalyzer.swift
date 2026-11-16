@@ -10,6 +10,8 @@ struct AnalyzedPage {
     var figureImages: [CGImage?]
     /// Строки с низкой уверенностью OCR: показываем фрагмент оригинала.
     var fallbackLines: [Int: CGImage]
+    /// Фрагменты скана на месте структуры, которую не удалось воссоздать (по индексам layout.scanRegions).
+    var scanImages: [CGImage?] = []
 
     static let minConfidence: Float = 0.35
     /// Страница без распознавания: показывается сканом (выбор читателя).
@@ -51,6 +53,7 @@ struct AnalyzedPage {
             fb[i] = gray.leveledImage(rect: line.bounds.insetBy(dx: -3, dy: -3))
         }
         fallbackLines = fb
+        scanImages = layout.scanRegions.map { gray.leveledImage(rect: $0.rect) }
     }
 }
 
@@ -92,10 +95,38 @@ struct LayoutAnalyzer {
     }
 
     func analyze(gray: GrayBitmap, image: CGImage) throws -> PageLayout {
-        let W = CGFloat(gray.width), H = CGFloat(gray.height)
-        var ink = InkMask(gray, threshold: gray.otsuThreshold())
         let ocr = try OCREngine.recognize(image, languages: languages, token: token)
         try token?.check()
+        return try build(gray: gray, image: image, ocr: ocr)
+    }
+
+    /// Строки OCR из готовой раскладки — повторный разбор страницы без распознавания
+    /// (отладка разбора структуры; блоки кода восстанавливаются приблизительно).
+    static func ocrLines(from layout: PageLayout) -> [OCRLine] {
+        func ocr(_ l: TextLine) -> OCRLine {
+            OCRLine(text: l.text, box: l.bounds, confidence: l.confidence, words: l.words.map { ($0.text, $0.bounds) })
+        }
+        var out = layout.allLines.map(ocr) + layout.figureLabels.map { ocr($0.line) }
+        for b in layout.codeBlocks {
+            for cl in b.lines {
+                let x = b.bounds.minX + CGFloat(cl.indent) * b.pitch
+                var words: [(String, CGRect)] = []
+                var cx = x
+                for w in cl.text.split(separator: " ") {
+                    let wr = CGRect(x: cx, y: cl.baseline - b.pitch * 1.4, width: CGFloat(w.count) * b.pitch, height: b.pitch * 1.8)
+                    words.append((String(w), wr)); cx = wr.maxX + b.pitch
+                }
+                guard !words.isEmpty else { continue }
+                let box = words.map(\.1).reduce(words[0].1) { $0.union($1) }
+                out.append(OCRLine(text: cl.text, box: box, confidence: 1, words: words))
+            }
+        }
+        return out
+    }
+
+    func build(gray: GrayBitmap, image: CGImage, ocr: [OCRLine]) throws -> PageLayout {
+        let W = CGFloat(gray.width), H = CGFloat(gray.height)
+        var ink = InkMask(gray, threshold: gray.otsuThreshold())
 
         // 1. Всё, что не текст: убираем строки OCR и ищем крупные связные области.
         var nonText = ink
@@ -144,16 +175,72 @@ struct LayoutAnalyzer {
             }
         }
 
-        // 3. Строки текста вне иллюстраций.
+        // 3. Строки текста вне иллюстраций; типичные ошибки распознавания — исправляем.
         var lines = ocr.filter { !inFigure($0.box) }.compactMap { buildLine($0, ink: ink) }
-        lines.sort { $0.bounds.minY < $1.bounds.minY }
+        OCRCorrector.correct(&lines, languages: languages)
+        for i in figureLabels.indices {
+            var l = [figureLabels[i].line]
+            OCRCorrector.correct(&l, languages: languages)
+            figureLabels[i].line = l[0]
+        }
 
-        // 4. Колонка и выравнивание.
-        assignAlignment(&lines, pageWidth: W)
+        // 3б. Таблицы в сетке линеек: иллюстрация, в которой нет ничего, кроме сетки и текста в клетках.
+        var tables: [TableBlock] = []
+        for fi in figures.indices.reversed() {
+            let labels = figureLabels.filter { $0.figure == fi }.map(\.line)
+            guard let t = StructureDetector.ruledTable(in: figures[fi], labels: labels, nonText: nonText) else { continue }
+            tables.insert(t, at: 0)
+            figures.remove(at: fi)
+            figureLabels = figureLabels.filter { $0.figure != fi }.map { var l = $0; if l.figure > fi { l.figure -= 1 }; return l }
+        }
+
+        // 3в. Колонки, оглавления, таблицы без линеек; остальное — обычный текст в порядке чтения.
+        let structure = StructureDetector(width: W, height: H, ink: ink).detect(lines)
+        lines = structure.lines
+        tables += structure.tables
+
+        // 4. Колонка и выравнивание (в многоколоночной зоне — по своей колонке).
+        let groups = Dictionary(grouping: lines.indices) { StructureDetector.group(of: lines[$0].bounds, zones: structure.zones) }
+        for idx in groups.values {
+            var part = idx.map { lines[$0] }
+            assignAlignment(&part, pageWidth: W)
+            for (k, i) in idx.enumerated() { lines[i] = part[k] }
+        }
 
         // 5. Абзацы и их оформление.
+        let structureLines = structure.toc.flatMap { $0.entries.flatMap(\.allLines) } + tables.flatMap { $0.cells.flatMap(\.lines) }
         let matcher = StyleMatcher(ink: ink, palette: palette,
-                                   pageStem: StyleMatcher.pageStemReference(lines: lines, ink: ink))
+                                   pageStem: StyleMatcher.pageStemReference(lines: lines + structureLines, ink: ink))
+        var toc = structure.toc
+        for ti in toc.indices {
+            for ei in toc[ti].entries.indices {
+                var e = toc[ti].entries[ei]
+                var group = e.allLines
+                (e.family, e.fontSize) = matcher.style(&group)
+                e.lines = Array(group.prefix(e.lines.count))
+                if var page = group.last, e.page != nil {
+                    // номер — начертанием названия (по одной-двум цифрам жирность и наклон не определить)
+                    let words = e.lines.flatMap(\.words)
+                    for wi in page.words.indices {
+                        page.words[wi].bold = words.filter(\.bold).count * 2 > words.count
+                        page.words[wi].italic = words.filter(\.italic).count * 2 > words.count
+                    }
+                    // число проверено по шаблону — одиночную цифру Vision отдаёт с низкой уверенностью
+                    if page.confidence > 0 { page.confidence = max(page.confidence, AnalyzedPage.minConfidence + 0.1) }
+                    e.page = page
+                }
+                toc[ti].entries[ei] = e
+            }
+        }
+        for ti in tables.indices {
+            var group = tables[ti].cells.flatMap(\.lines)
+            guard !group.isEmpty else { continue }
+            (tables[ti].family, tables[ti].fontSize) = matcher.style(&group)
+            var k = 0
+            for ci in tables[ti].cells.indices {
+                for li in tables[ti].cells[ci].lines.indices { tables[ti].cells[ci].lines[li] = group[k]; k += 1 }
+            }
+        }
         var styled: [Paragraph] = []
         for var group in groupParagraphs(lines) {
             let (family, size) = matcher.style(&group)
@@ -198,7 +285,8 @@ struct LayoutAnalyzer {
         }
         flush()
         return PageLayout(size: CGSize(width: W, height: H), figures: figures, rules: rules, paragraphs: paragraphs,
-                          codeBlocks: codeBlocks, figureLabels: figureLabels)
+                          codeBlocks: codeBlocks, figureLabels: figureLabels, tocBlocks: toc, tables: tables,
+                          scanRegions: structure.scans, columnZones: structure.zones)
     }
 
     // MARK: - код

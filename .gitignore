@@ -21,6 +21,8 @@ demo/*
 !demo/synthetic-page.png
 !demo/code-page.png
 !demo/library/
+!demo/structure/
+demo/structure/screens/
 
 # релизная сборка
 build/

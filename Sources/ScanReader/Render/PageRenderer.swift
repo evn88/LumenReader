@@ -97,6 +97,59 @@ struct PageRenderer {
                 lineIndex += 1
             }
         }
+        drawStructure(page, lineIndex: lineIndex, cg: cg)
+    }
+
+    /// Оглавления, таблицы и фрагменты скана — на своих местах (масштаб 100%).
+    private func drawStructure(_ page: AnalyzedPage, lineIndex start: Int, cg: CGContext) {
+        let layout = page.layout
+        var lineIndex = start
+        // строка: текстом или (низкая уверенность) фрагментом оригинала; возвращает края нарисованной краски
+        func line(_ l: TextLine, _ family: FontFamily, _ size: CGFloat) -> (CGFloat, CGFloat) {
+            defer { lineIndex += 1 }
+            if let crop = page.fallbackLines[lineIndex] {
+                drawImage(crop, in: l.bounds.insetBy(dx: -3, dy: -3).integral, cg: cg)
+                return (l.bounds.minX, l.bounds.maxX)
+            }
+            return draw(l, family: family, size: size, cg: cg)
+        }
+        for toc in layout.tocBlocks {
+            for e in toc.entries {
+                let size = displaySize(Paragraph(family: e.family, fontSize: e.fontSize, lines: e.allLines))
+                var titleEnd: CGFloat = 0
+                for l in e.lines { titleEnd = line(l, e.family, size).1 }
+                guard let p = e.page else { continue }
+                let numberStart = line(p, e.family, size).0
+                if e.leader, let last = e.lines.last {
+                    drawLeader(from: titleEnd, to: numberStart, baseline: last.baseline, family: e.family, size: size,
+                               grid: toc.bounds.minX, cg: cg)
+                }
+            }
+        }
+        for t in layout.tables {
+            cg.setFillColor(theme.ink)
+            for r in t.gridRules { cg.fill(r) }
+            let size = displaySize(Paragraph(family: t.family, fontSize: t.fontSize, lines: t.cells.flatMap(\.lines)))
+            for c in t.cells { for l in c.lines { _ = line(l, t.family, size) } }
+        }
+        for (i, r) in layout.scanRegions.enumerated() {
+            if page.scanImages.indices.contains(i), let image = page.scanImages[i] { drawImage(image, in: r.rect.integral, cg: cg) }
+        }
+    }
+
+    /// Точки-заполнители между названием и номером страницы. Точки стоят на общей сетке от левого края
+    /// оглавления — в соседних пунктах они выстраиваются в столбцы, как в типографском наборе.
+    func drawLeader(from a: CGFloat, to b: CGFloat, baseline: CGFloat, family: FontFamily, size: CGFloat,
+                    grid: CGFloat, cg: CGContext) {
+        let dot = TextMetrics.line(".", font: palette.font(family, bold: false, italic: false, size: size), color: theme.ink)
+        let ink = TextMetrics.inkBounds(dot)
+        let step = size * 0.5
+        var x = grid + (((a + step * 0.8) - grid) / step).rounded(.up) * step
+        while x + ink.width <= b - step * 1.1 {
+            cg.textPosition = CGPoint(x: x - ink.minX, y: baseline)
+            CTLineDraw(dot, cg)
+            x += step
+        }
     }
 
     /// Экранная страница перекомпонованного текста (масштаб ≠ 100%).
@@ -139,6 +192,10 @@ struct PageRenderer {
                 }
             case .fallback(let li, let rect):
                 if let crop = page.fallbackLines[li] { drawImage(crop, in: rect.integral, cg: cg) }
+            case .leader(let a, let b, let baseline, let family, let size, let grid):
+                drawLeader(from: a, to: b, baseline: baseline, family: family, size: size, grid: grid, cg: cg)
+            case .scan(let i, let rect):
+                if page.scanImages.indices.contains(i), let image = page.scanImages[i] { drawImage(image, in: rect.integral, cg: cg) }
             }
         }
     }
@@ -223,7 +280,8 @@ struct PageRenderer {
         palette.font(family, bold: w.bold, italic: w.italic, size: size)
     }
 
-    private func draw(_ line: TextLine, family: FontFamily, size: CGFloat, cg: CGContext) {
+    @discardableResult
+    private func draw(_ line: TextLine, family: FontFamily, size: CGFloat, cg: CGContext) -> (CGFloat, CGFloat) {
         let ctLines = line.words.map { TextMetrics.line($0.text, font: font(family, $0, size), color: theme.ink) }
         let inks = ctLines.map(TextMetrics.inkBounds)
         let space = TextMetrics.advance(TextMetrics.line(" ", font: palette.font(family, bold: false, italic: false, size: size)))
@@ -255,5 +313,7 @@ struct PageRenderer {
             cg.textPosition = CGPoint(x: xs[i] - inks[i].minX, y: line.baseline)
             CTLineDraw(l, cg)
         }
+        guard let first = xs.first, let last = xs.last, let w = inks.last?.width else { return (line.bounds.minX, line.bounds.maxX) }
+        return (first, last + w)
     }
 }

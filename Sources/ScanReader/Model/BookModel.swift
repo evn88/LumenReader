@@ -101,7 +101,7 @@ enum SyncedFile {
 /// результат распознавания получают все участники, в том числе с другим Apple ID.
 /// Если папка книги недоступна для записи — локально в Application Support.
 struct LayoutCache {
-    static let version = "v4"   // меняем при изменении анализа — старые раскладки пересчитаются
+    static let version = "v5"   // меняем при изменении анализа — старые раскладки пересчитаются
     let dir: URL
 
     init(bookURL: URL, palette: FontPalette, languages: [String]) {

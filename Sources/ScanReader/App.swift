@@ -171,7 +171,18 @@ enum RenderCLI {
         }
         do {
             let start = Date()
-            let page = try LayoutAnalyzer(palette: .original, languages: ["ru-RU", "en-US"]).analyze(image)
+            // ScanReader --render скан.png вывод.png тема масштаб [раскладка.json] — разбор по готовым строкам OCR
+            let args = CommandLine.arguments
+            let analyzer = LayoutAnalyzer(palette: .original, languages: ["ru-RU", "en-US"])
+            let page: AnalyzedPage
+            if let i = args.firstIndex(of: "--render"), args.count > i + 5,
+               let data = try? Data(contentsOf: URL(fileURLWithPath: args[i + 5])),
+               let old = try? JSONDecoder().decode(PageLayout.self, from: data), let gray = GrayBitmap(cgImage: image) {
+                let layout = try analyzer.build(gray: gray, image: image, ocr: LayoutAnalyzer.ocrLines(from: old))
+                page = try analyzer.analyze(image, cached: layout)
+            } else {
+                page = try analyzer.analyze(image)
+            }
             print(String(format: "Анализ: %.2f с", Date().timeIntervalSince(start)))
             for p in page.layout.paragraphs {
                 for l in p.lines {
@@ -180,6 +191,19 @@ enum RenderCLI {
                     print("\(p.family.rawValue) \(Int(p.fontSize))px \(l.alignment.rawValue)\t\(l.text)  \(styled.joined(separator: " "))")
                 }
             }
+            for z in page.layout.columnZones { print("Колонки: \(z.rect.integral), просветы \(z.splits.map { Int($0) })") }
+            for t in page.layout.tocBlocks {
+                print("--- оглавление ---")
+                for e in t.entries {
+                    print(String(repeating: "    ", count: e.level) + e.title + (e.leader ? " ……… " : " … ") + (e.page?.text ?? "—")
+                          + "  [\(e.family.rawValue) \(Int(e.fontSize))px]")
+                }
+            }
+            for t in page.layout.tables {
+                print("--- таблица \(t.ruled ? "в сетке" : "без линеек") \(t.rows.count - 1)×\(t.columns.count - 1) [\(t.family.rawValue) \(Int(t.fontSize))px] ---")
+                print(t.text)
+            }
+            for r in page.layout.scanRegions { print("--- фрагмент скана \(r.rect.integral) ---\n" + r.lines.map(\.text).joined(separator: "\n")) }
             print("Иллюстрации: \(page.layout.figures)\nЛинейки: \(page.layout.rules)")
             print("Надписей в иллюстрациях: \(page.layout.figureLabels.count)")
             for b in page.layout.codeBlocks {

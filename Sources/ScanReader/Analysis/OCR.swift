@@ -17,6 +17,8 @@ enum OCREngine {
     static func recognize(_ image: CGImage, languages: [String], languageCorrection: Bool = true,
                           customWords: [String] = [], token: CancelToken? = nil) throws -> [OCRLine] {
         try token?.check()
+        // отладка: распознавание через RecognizeDocumentsRequest (другая модель Vision; медленно)
+        if ProcessInfo.processInfo.environment["SR_OCR"] == "documents" { return try recognizeDocument(image, languages: languages) }
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = languageCorrection   // для кода выключаем: ломает идентификаторы
@@ -58,5 +60,35 @@ enum OCREngine {
             guard !words.isEmpty else { return nil }
             return OCRLine(text: s, box: toPixels(obs.boundingBox), confidence: cand.confidence, words: words)
         }
+    }
+
+    /// Строки документа из RecognizeDocumentsRequest — для отладки, когда точный режим VNRecognizeTextRequest недоступен.
+    static func recognizeDocument(_ image: CGImage, languages: [String]) throws -> [OCRLine] {
+        var req = RecognizeDocumentsRequest()
+        if !languages.isEmpty { req.textRecognitionOptions.recognitionLanguages = languages.map { Locale.Language(identifier: $0) } }
+        let sem = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var result: Result<[DocumentObservation], Error> = .success([])
+        Task.detached {
+            do { result = .success(try await req.perform(on: image)) } catch { result = .failure(error) }
+            sem.signal()
+        }
+        sem.wait()
+        let W = CGFloat(image.width), H = CGFloat(image.height)
+        func px(_ n: CGRect) -> CGRect { CGRect(x: n.minX * W, y: (1 - n.maxY) * H, width: n.width * W, height: n.height * H) }
+        var out: [OCRLine] = []
+        for doc in try result.get() {
+            for obs in doc.document.text.lines {
+                guard let cand = obs.topCandidates(1).first else { continue }
+                let s = cand.string
+                var words: [(text: String, box: CGRect)] = []
+                for t in s.split(whereSeparator: \.isWhitespace) {
+                    let box = cand.boundingBox(for: t.startIndex..<t.endIndex)?.boundingBox.cgRect ?? .zero
+                    words.append((String(t), px(box)))
+                }
+                guard !words.isEmpty else { continue }
+                out.append(OCRLine(text: s, box: px(obs.boundingBox.cgRect), confidence: cand.confidence, words: words))
+            }
+        }
+        return out
     }
 }
