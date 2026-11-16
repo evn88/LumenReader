@@ -179,7 +179,8 @@ final class LibraryStore: ObservableObject {
             let side = Sidecar.dir(for: url)
             let recognized = ((try? fm.contentsOfDirectory(atPath: side.path)) ?? []).contains { $0.hasPrefix("layouts-") }
             let added = (try? url.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? .distantPast
-            return LibraryBook(url: url, kind: kind, title: title!, author: author, collections: meta.collections ?? [],
+            let resolved = BookMetadata.resolve(title: title, author: author, fileName: url.deletingPathExtension().lastPathComponent)
+            return LibraryBook(url: url, kind: kind, title: resolved.title, author: resolved.author, collections: meta.collections ?? [],
                                progress: meta.progress, lastOpened: meta.lastOpened, added: added, recognized: recognized)
         }
     }
@@ -300,24 +301,85 @@ final class LibraryStore: ObservableObject {
 
     // MARK: - импорт файлов
 
+    /// Идёт импорт: сколько скопировано из скольких (индикатор в окне библиотеки).
+    @Published private(set) var importProgress: (done: Int, total: Int)?
+
+    /// Что из перетаскиваемого можно добавить: PDF, EPUB, картинки, папки со сканами
+    /// (в том числе ещё не скачанные из iCloud — «.имя.pdf.icloud»).
+    nonisolated static func importable(_ urls: [URL]) -> [URL] {
+        urls.compactMap { u -> URL? in
+            let real = iCloudPlaceholderTarget(u) ?? u
+            return kind(of: real) != nil || ["pdf", "epub"].contains(real.pathExtension.lowercased()) ? real : nil
+        }
+    }
+
+    /// «.Книга.pdf.icloud» (не скачанный файл iCloud) → «Книга.pdf» рядом.
+    nonisolated static func iCloudPlaceholderTarget(_ u: URL) -> URL? {
+        let n = u.lastPathComponent
+        guard n.hasPrefix("."), n.hasSuffix(".icloud") else { return nil }
+        return u.deletingLastPathComponent().appendingPathComponent(String(n.dropFirst().dropLast(7)))
+    }
+
+    /// Тот же файл уже в библиотеке: одинаковые размер и начало содержимого (имя может отличаться).
+    nonisolated static func isDuplicate(_ src: URL, in folder: URL) -> Bool {
+        let fm = FileManager.default
+        let size = { (u: URL) -> Int64? in (try? fm.attributesOfItem(atPath: u.path)[.size] as? Int64) ?? nil }
+        var isDir: ObjCBool = false
+        fm.fileExists(atPath: src.path, isDirectory: &isDir)
+        let existing = folder.appendingPathComponent(src.lastPathComponent)
+        if isDir.boolValue { return fm.fileExists(atPath: existing.path) }
+        guard let s = size(src) else { return false }
+        let head = { (u: URL) -> Data? in (try? FileHandle(forReadingFrom: u)).flatMap { h in defer { try? h.close() }; return try? h.read(upToCount: 65_536) } }
+        let srcHead = head(src)
+        for f in (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        where f.pathExtension.lowercased() == src.pathExtension.lowercased() && size(f) == s {
+            if head(f) == srcHead { return true }
+        }
+        return false
+    }
+
     /// Копирование файлов в папку библиотеки (диалог «Файлы…» и перетаскивание).
-    func importFiles(_ urls: [URL]) {
+    /// Дубликаты пропускаются; не скачанные из iCloud файлы сначала скачиваются (координированное чтение).
+    /// collection — сразу добавить новые книги в коллекцию (сброс на коллекцию в сайдбаре).
+    func importFiles(_ urls: [URL], collection: String? = nil) {
         guard let folder else { return }
+        let items = Self.importable(urls).filter { $0.deletingLastPathComponent().standardizedFileURL != folder.standardizedFileURL }
+        guard !items.isEmpty else { return }
+        importProgress = (0, items.count)
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
-            for src in urls where Self.kind(of: src) != nil && src.deletingLastPathComponent() != folder {
-                var dst = folder.appendingPathComponent(src.lastPathComponent)
-                var n = 2
-                while fm.fileExists(atPath: dst.path) {
-                    dst = folder.appendingPathComponent("\(src.deletingPathExtension().lastPathComponent) \(n)")
-                        .appendingPathExtension(src.pathExtension); n += 1
+            var done = 0
+            for src in items {
+                defer { done += 1; let d = done; Task { @MainActor in self.importProgress = (d, items.count) } }
+                try? fm.startDownloadingUbiquitousItem(at: src)
+                var copied: URL?
+                var readErr: NSError?
+                // координированное чтение ждёт, пока iCloud докачает файл
+                NSFileCoordinator().coordinate(readingItemAt: src, options: [], error: &readErr) { readable in
+                    if Self.isDuplicate(readable, in: folder) { return }
+                    var dst = folder.appendingPathComponent(src.lastPathComponent)
+                    var n = 2
+                    while fm.fileExists(atPath: dst.path) {
+                        dst = folder.appendingPathComponent("\(src.deletingPathExtension().lastPathComponent) \(n)")
+                            .appendingPathExtension(src.pathExtension); n += 1
+                    }
+                    var err: NSError?
+                    NSFileCoordinator().coordinate(writingItemAt: dst, options: .forReplacing, error: &err) { url in
+                        if (try? fm.copyItem(at: readable, to: url)) != nil { copied = dst }
+                    }
                 }
-                var err: NSError?
-                NSFileCoordinator().coordinate(writingItemAt: dst, options: .forReplacing, error: &err) { url in
-                    try? fm.copyItem(at: src, to: url)
+                if let copied, let collection {
+                    Sidecar.update(copied) { m in
+                        var c = m.collections ?? []
+                        if !c.contains(collection) { c.append(collection) }
+                        m.collections = c
+                    }
                 }
             }
-            await MainActor.run { self.refresh() }
+            await MainActor.run {
+                self.importProgress = nil
+                self.refresh()
+            }
         }
     }
 }

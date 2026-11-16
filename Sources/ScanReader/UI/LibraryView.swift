@@ -115,6 +115,8 @@ struct LibraryView: View {
     @State private var newCollection = false
     @State private var newCollectionName = ""
     @Environment(\.colorScheme) private var scheme
+    @State private var dropCount: Int?
+    @State private var dropCollection: String?
 
     private var sort: LibrarySort { LibrarySort(rawValue: sortRaw) ?? .recent }
 
@@ -143,6 +145,9 @@ struct LibraryView: View {
                     ForEach(store.collections, id: \.self) { c in
                         SidebarRow(title: c, symbol: "books.vertical", count: store.books.filter { $0.collections.contains(c) }.count)
                             .tag(LibraryFilter.collection(c))
+                            // сброс на коллекцию — книги сразу в неё
+                            .onDrop(of: [.fileURL], delegate: CollectionDrop(inner: BookDropDelegate(dropCount: $dropCount, collection: c, store: store),
+                                                                             name: c, target: $dropCollection))
                     }
                     Button { newCollection = true } label: { Label("Новая коллекция", systemImage: "plus") }
                         .buttonStyle(.plain).foregroundStyle(.secondary)
@@ -162,7 +167,12 @@ struct LibraryView: View {
                 .toolbar { toolbar }
                 .toolbarBackground(Brand.paper(scheme), for: .windowToolbar)
         }
-        .dropDestination(for: URL.self) { urls, _ in store.importFiles(urls); return true }
+        .onDrop(of: [.fileURL], delegate: BookDropDelegate(dropCount: $dropCount, store: store))
+        .overlay { if let n = dropCount { DropHighlight(count: n, collection: dropCollection) } }
+        .overlay(alignment: .bottom) {
+            if let p = store.importProgress { ImportProgressBadge(done: p.done, total: p.total) }
+        }
+        .animation(.easeOut(duration: 0.15), value: dropCount)
         .tourOverlay(.library)
         .onAppear { TourCenter.shared.startIfNeeded(.library) }
         .sheet(isPresented: $showAppleBooks) { AppleBooksImportSheet() }
@@ -371,7 +381,8 @@ struct BookCell: View {
                 .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(selected ? Brand.amber.opacity(0.8) : .clear, lineWidth: 1.5))
             Text(book.title).font(.callout.weight(.medium)).lineLimit(2)
             HStack(alignment: .firstTextBaseline) {
-                Text(book.author ?? " ").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Text(book.author ?? "").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    .accessibilityHidden(book.author == nil)
                 Spacer(minLength: 4)
                 ProgressBadge(book: book)
             }
@@ -623,4 +634,108 @@ struct SettingsView: View {
         .frame(width: 520)
         .padding()
     }
+}
+
+// MARK: - перетаскивание книг в окно
+
+/// Приём файлов из Finder во всё окно библиотеки: подсветка (янтарная пунктирная рамка по углам окна,
+/// затемнение, «Отпустите, чтобы добавить N книг»); неподдерживаемое — без подсветки и с курсором «нельзя».
+struct BookDropDelegate: DropDelegate {
+    @Binding var dropCount: Int?
+    var collection: String? = nil
+    var store: LibraryStore
+
+    private func urls(_ info: DropInfo, _ done: @escaping ([URL]) -> Void) {
+        let providers = info.itemProviders(for: [.fileURL])
+        var result: [URL] = []
+        let group = DispatchGroup()
+        let lock = NSLock()
+        for p in providers {
+            group.enter()
+            _ = p.loadObject(ofClass: URL.self) { u, _ in
+                if let u { lock.lock(); result.append(u); lock.unlock() }
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) { done(result) }
+    }
+
+    func validateDrop(info: DropInfo) -> Bool { info.hasItemsConforming(to: [.fileURL]) }
+
+    func dropEntered(info: DropInfo) {
+        urls(info) { u in
+            let n = LibraryStore.importable(u).count
+            dropCount = n > 0 ? n : nil
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: dropCount == nil ? .forbidden : .copy)
+    }
+
+    func dropExited(info: DropInfo) { dropCount = nil }
+
+    func performDrop(info: DropInfo) -> Bool {
+        let ok = dropCount != nil
+        dropCount = nil
+        guard ok else { return false }
+        urls(info) { u in MainActor.assumeIsolated { store.importFiles(u, collection: collection) } }
+        return true
+    }
+}
+
+struct DropHighlight: View {
+    let count: Int
+    var collection: String? = nil
+
+    private var text: String {
+        let m10 = count % 10, m100 = count % 100
+        let w = m10 == 1 && m100 != 11 ? "книгу" : (2...4).contains(m10) && !(12...14).contains(m100) ? "книги" : "книг"
+        return collection.map { "Отпустите, чтобы добавить \(count) \(w) в «\($0)»" } ?? "Отпустите, чтобы добавить \(count) \(w)"
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.18)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Brand.amber, style: StrokeStyle(lineWidth: 3, dash: [10, 7]))
+                .padding(10)
+            VStack(spacing: 10) {
+                Image(systemName: "tray.and.arrow.down.fill").font(.system(size: 36)).foregroundStyle(Brand.amber)
+                Text(text).font(.title3.weight(.semibold))
+            }
+            .padding(.horizontal, 24).padding(.vertical, 16)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        }
+        .allowsHitTesting(false)
+        .transition(.opacity)
+    }
+}
+
+/// Индикатор импорта поверх окна.
+struct ImportProgressBadge: View {
+    let done: Int
+    let total: Int
+    var body: some View {
+        HStack(spacing: 10) {
+            ProgressView(value: Double(done), total: Double(max(1, total))).tint(Brand.amber).frame(width: 120)
+            Text("Добавляю книги: \(done) из \(total)").font(.callout)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+        .background(.regularMaterial, in: Capsule())
+        .shadow(color: .black.opacity(0.15), radius: 8, y: 2)
+        .padding(16)
+    }
+}
+
+/// Сброс на коллекцию: тот же приём, плюс подпись «…в «Коллекция»».
+struct CollectionDrop: DropDelegate {
+    var inner: BookDropDelegate
+    let name: String
+    @Binding var target: String?
+    func validateDrop(info: DropInfo) -> Bool { inner.validateDrop(info: info) }
+    func dropEntered(info: DropInfo) { target = name; inner.dropEntered(info: info) }
+    func dropUpdated(info: DropInfo) -> DropProposal? { inner.dropUpdated(info: info) }
+    func dropExited(info: DropInfo) { target = nil; inner.dropExited(info: info) }
+    func performDrop(info: DropInfo) -> Bool { target = nil; return inner.performDrop(info: info) }
 }

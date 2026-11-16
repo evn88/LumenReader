@@ -229,7 +229,7 @@ enum AppleBooksImporter {
         }
         guard ok else { return false }
         Sidecar.update(dst) { m in
-            m.title = item.title; m.author = item.author; m.collections = item.collections
+            m.title = item.title; m.author = BookMetadata.author(item.author); m.collections = item.collections
             m.progress = item.progress; m.importedFrom = "Apple Books"; m.importedAt = Date()
         }
         return true

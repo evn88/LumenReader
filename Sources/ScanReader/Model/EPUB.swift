@@ -79,7 +79,7 @@ struct EPUBBook {
         guard let opf = try? String(contentsOf: opfURL, encoding: .utf8) else { throw Failure.unreadable }
 
         title = Self.matches(#"<dc:title[^>]*>([^<]+)</dc:title>"#, opf).first.map(Self.unescape) ?? url.deletingPathExtension().lastPathComponent
-        author = Self.matches(#"<dc:creator[^>]*>([^<]+)</dc:creator>"#, opf).first.map(Self.unescape)
+        author = BookMetadata.author(Self.matches(#"<dc:creator[^>]*>([^<]+)</dc:creator>"#, opf).first.map(Self.unescape))
         language = Self.matches(#"<dc:language[^>]*>([^<]+)</dc:language>"#, opf).first
 
         for tag in Self.matches(#"(<item\s[^>]*>)"#, opf) {
