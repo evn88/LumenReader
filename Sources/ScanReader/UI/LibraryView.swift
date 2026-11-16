@@ -154,18 +154,22 @@ struct LibraryView: View {
                         .accessibilityLabel("Новая коллекция")
                 }
             }
-            .scrollContentBackground(.hidden)
-            .background(Brand.sidebar(scheme))
+            // системный материал сайдбара во всю высоту окна (вместе со светофором), без своего фона
+            .listStyle(.sidebar)
+            .scrollIndicators(.automatic)
+            .background(OverlayScrollers())
             .navigationSplitViewColumnWidth(min: 200, ideal: 220)
             .tourAnchor("library.sidebar")
         } detail: {
             content
-                .background(Brand.paper(scheme))
+                // тёплый фон под всё окно, включая область под прозрачным тулбаром:
+                // сетка уходит под тулбар с системным scroll edge effect, без своей полосы
+                .background(Brand.paper(scheme).ignoresSafeArea())
+                .background(OverlayScrollers())
                 .tourAnchor("library.grid")
                 .navigationTitle((filter ?? .all).title)
                 .searchable(text: $query, placement: .toolbar, prompt: "Поиск")
                 .toolbar { toolbar }
-                .toolbarBackground(Brand.paper(scheme), for: .windowToolbar)
         }
         .onDrop(of: [.fileURL], delegate: BookDropDelegate(dropCount: $dropCount, store: store))
         .overlay { if let n = dropCount { DropHighlight(count: n, collection: dropCollection) } }
@@ -441,18 +445,62 @@ struct SidebarRow: View {
     let symbol: String
     let count: Int
     @Environment(\.colorScheme) private var scheme
+    /// Выбранная строка в активном окне: текст и иконка — белые на акценте (HIG), а не янтарь на янтаре.
+    @Environment(\.backgroundProminence) private var prominence
+
     var body: some View {
-        HStack {
-            Label {
-                Text(title)
-            } icon: {
-                Image(systemName: symbol).symbolRenderingMode(.hierarchical).foregroundStyle(Brand.amberText(scheme))
+        let selected = prominence == .increased
+        HStack(spacing: 8) {
+            Image(systemName: symbol)
+                .font(.system(size: 15))
+                .frame(width: 20, alignment: .center)
+                .foregroundStyle(selected ? AnyShapeStyle(.white) : AnyShapeStyle(Brand.amberText(scheme)))
+            Text(title).lineLimit(1)
+            Spacer(minLength: 8)
+            if count > 0 {
+                Text("\(count)").font(.callout.monospacedDigit())
+                    .foregroundStyle(selected ? AnyShapeStyle(.white.opacity(0.85)) : AnyShapeStyle(.secondary))
             }
-            Spacer()
-            if count > 0 { Text("\(count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
         }
         .accessibilityElement(children: .combine)
     }
+}
+
+/// Тонкие оверлейные полосы прокрутки (появляются при прокрутке, колонку не занимают).
+/// Если в Системных настройках выбрано «Показывать полосы прокрутки: всегда», не трогаем.
+struct OverlayScrollers: NSViewRepresentable {
+    final class Probe: NSView {
+        private var token: NSObjectProtocol?
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            apply()
+            token.map(NotificationCenter.default.removeObserver)
+            token = NotificationCenter.default.addObserver(forName: NSScroller.preferredScrollerStyleDidChangeNotification,
+                                                           object: nil, queue: .main) { [weak self] _ in self?.apply() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.apply() }
+        }
+        func apply() {
+            guard let root = window?.contentView else { return }
+            let always = UserDefaults.standard.string(forKey: "AppleShowScrollBars") == "Always"
+            func walk(_ v: NSView) {
+                if let sv = v as? NSScrollView {
+                    if always {
+                        // «Всегда»: системный стиль, но без серой колонки под полосой — фон окна виден насквозь
+                        sv.drawsBackground = false
+                        sv.verticalScroller?.wantsLayer = true
+                        sv.verticalScroller?.layer?.backgroundColor = .clear
+                    } else if sv.scrollerStyle != .overlay {
+                        sv.scrollerStyle = .overlay; sv.autohidesScrollers = true
+                    }
+                }
+                v.subviews.forEach(walk)
+            }
+            walk(root)
+        }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+    func makeNSView(context: Context) -> Probe { Probe() }
+    func updateNSView(_ v: Probe, context: Context) { DispatchQueue.main.async { v.apply() } }
 }
 
 /// Пустая библиотека: лампа над раскрытой книгой.
