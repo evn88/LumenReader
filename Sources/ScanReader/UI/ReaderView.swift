@@ -13,9 +13,9 @@ struct ReaderView: View {
 
     @AppStorage("theme") private var themeName = ReaderTheme.calm.name
     @AppStorage("darkVariant") private var darkVariant = false
-    @AppStorage("twoPages") private var twoPages = true
+    @AppStorage("twoPages") fileprivate var twoPages = true
     @AppStorage("textScale") private var textScale = 1.0
-    @AppStorage("textScaleAuto") private var textScaleAuto = true
+    @AppStorage("textScaleAuto") fileprivate var textScaleAuto = true
     @AppStorage("textScaleAutoValue") private var autoValue = 1.0
     @State private var containerSize: CGSize = .zero
     /// Действующий масштаб: ручной или подобранный под экран.
@@ -24,11 +24,11 @@ struct ReaderView: View {
     @AppStorage("margins") private var margins = 1.0
     @AppStorage("justify") private var justify = false
     @AppStorage("fontChoice") private var fontChoice = "theme"
-    @AppStorage("enhanceFigures") private var enhanceFigures = true
-    @AppStorage("enhanceScans") private var enhanceScans = true
-    @AppStorage("languages") private var languagesCSV = "ru-RU,en-US"
+    @AppStorage("enhanceFigures") fileprivate var enhanceFigures = true
+    @AppStorage("enhanceScans") fileprivate var enhanceScans = true
+    @AppStorage("languages") fileprivate var languagesCSV = "ru-RU,en-US"
 
-    @State private var pos = ScreenPos(page: 0, sub: 0)
+    @State fileprivate var pos = ScreenPos(page: 0, sub: 0)
     @State private var showOriginal = false
     @State private var showTOC = false
     @State private var showNotes = false
@@ -37,7 +37,7 @@ struct ReaderView: View {
     @State private var showSearch = false
     @State private var query = ""
     @State private var searchStatus = ""
-    @State private var bookmarks: Set<Int> = []
+    @State fileprivate var bookmarks: Set<Int> = []
     @StateObject private var turner = PageTurner()
     @StateObject private var chrome = ChromeVisibility()
 
@@ -45,7 +45,7 @@ struct ReaderView: View {
         let t = ReaderTheme.named(themeName)
         return darkVariant ? t.darkVariant() : t
     }
-    private var palette: FontPalette {
+    fileprivate var palette: FontPalette {
         switch fontChoice {
         case "original": return .original
         case "iowan": return .books
@@ -54,7 +54,7 @@ struct ReaderView: View {
         default: return ReaderTheme.named(themeName).palette
         }
     }
-    private var settings: ReflowSettings {
+    fileprivate var settings: ReflowSettings {
         ReflowSettings(scale: CGFloat(scale), lineSpacing: CGFloat(lineSpacing), margins: CGFloat(margins), justify: justify)
     }
     private var ink: Color { Color(cgColor: theme.ink) }
@@ -163,21 +163,12 @@ struct ReaderView: View {
             book.updateScreenCounts(settings)
             prefetch()
         }
-        .onChange(of: pos) { prefetch(); saveProgress() }
-        .onChange(of: bookmarks) { let b = bookmarks.sorted(); Sidecar.update(book.url) { $0.bookmarks = b } }
-        .onChange(of: twoPages) { prefetch() }
-        .onChange(of: settings) { book.updateScreenCounts(settings); prefetch() }
-        .onChange(of: textScaleAuto) { updateAutoScale() }
-        .onChange(of: book.pages.count) { updateAutoScale() }
-        .onChange(of: palette) { book.palette = palette; book.updateScreenCounts(settings) }
-        .onChange(of: enhanceFigures) { book.enhanceFigures = enhanceFigures }
-        .onChange(of: enhanceScans) { book.enhanceScans = enhanceScans }
-        .onChange(of: languagesCSV) { book.languages = languagesCSV.split(separator: ",").map(String.init) }
+        .modifier(SettingsObservers(reader: self))
         .sheet(isPresented: $showCustomize) { CustomizeSheet() }
         .tourOverlay(.book)
         .onAppear { TourCenter.shared.startIfNeeded(.book) }
         // пока идёт тур, панель не прячется — стрелкам есть на что указывать
-        .onReceive(TourCenter.shared.$part) { chrome.pinned = $0 == .book || showTOC || showNotes || showAppearance || showSearch }
+        .onReceive(TourCenter.shared.$part) { p in pinChrome(p == .book) }
         .onChange(of: showTOC || showNotes || showAppearance || showSearch || showCustomize) { _, open in chrome.pinned = open }
     }
 
@@ -391,7 +382,7 @@ struct ReaderView: View {
     }
 
     /// Автомасштаб: какой кегль основного текста скана сейчас на экране (pt) и сколько это физически.
-    private func updateAutoScale() {
+    fileprivate func updateAutoScale() {
         guard textScaleAuto, let p = visible.first.flatMap({ book.pages[$0.page] }), !p.scanOnly else { return }
         let body = p.layout.paragraphs.max { $0.lines.count < $1.lines.count }
         guard let fontPx = body?.fontSize, containerSize.width > 100 else { return }
@@ -404,6 +395,28 @@ struct ReaderView: View {
         let ppi = TextScale.pointsPerInch(NSApp.keyWindow?.screen ?? NSScreen.main)
         let v = TextScale.auto(bodyPoints: bodyPt, pointsPerInch: ppi)
         if abs(v - autoValue) > 0.001 { autoValue = v }
+    }
+
+    private func pinChrome(_ tour: Bool) {
+        chrome.pinned = tour || showTOC || showNotes || showAppearance || showSearch
+    }
+
+    /// Реакции на изменение настроек — отдельно, чтобы цепочка модификаторов не душила проверку типов.
+    fileprivate struct SettingsObservers: ViewModifier {
+        let reader: ReaderView
+        func body(content: Content) -> some View {
+            content
+                .onChange(of: reader.pos) { reader.prefetch(); reader.saveProgress() }
+                .onChange(of: reader.bookmarks) { let b = reader.bookmarks.sorted(); Sidecar.update(reader.book.url) { $0.bookmarks = b } }
+                .onChange(of: reader.twoPages) { reader.prefetch() }
+                .onChange(of: reader.settings) { reader.book.updateScreenCounts(reader.settings); reader.prefetch() }
+                .onChange(of: reader.textScaleAuto) { reader.updateAutoScale() }
+                .onChange(of: reader.book.pages.count) { reader.updateAutoScale() }
+                .onChange(of: reader.palette) { reader.book.palette = reader.palette; reader.book.updateScreenCounts(reader.settings) }
+                .onChange(of: reader.enhanceFigures) { reader.book.enhanceFigures = reader.enhanceFigures }
+                .onChange(of: reader.enhanceScans) { reader.book.enhanceScans = reader.enhanceScans }
+                .onChange(of: reader.languagesCSV) { reader.book.languages = reader.languagesCSV.split(separator: ",").map(String.init) }
+        }
     }
 
     /// Перелистнуть и сказать, получилось ли (для анимации).
@@ -430,7 +443,7 @@ struct ReaderView: View {
         }
     }
 
-    private func saveProgress() {
+    fileprivate func saveProgress() {
         let last = visible.last!
         let (n, m) = number(last)
         LibraryStore.shared.recordReading(book.url, progress: Double(n) / Double(max(1, m)),
@@ -438,7 +451,7 @@ struct ReaderView: View {
     }
 
     /// Видимые страницы + упреждение на несколько страниц вперёд.
-    private func prefetch() {
+    fileprivate func prefetch() {
         var pages: [Int] = []
         for p in visible where !pages.contains(p.page) { pages.append(p.page) }
         book.prefetch(visible: pages)
