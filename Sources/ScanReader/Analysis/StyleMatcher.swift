@@ -109,4 +109,44 @@ struct StyleMatcher {
             acc + Double(s.0.text.count) * shapeScore(s.0, s.1, family: family, italic: s.0.italic)
         }
     }
+
+    /// Жирность заголовка по плотности краски: доля закрашенного в рамке слова против того же слова,
+    /// набранного обычным начертанием в подобранном кегле. Толщина штриха у крупного кегля
+    /// относительно x-height мало отличается от основного текста, а плотность — заметно.
+    func headingIsBold(_ lines: [TextLine], family: FontFamily) -> Bool? {
+        let samples = lines.flatMap { l in l.words.map { ($0, l) } }.filter { $0.0.text.count >= 4 }
+            .sorted { $0.0.text.count > $1.0.text.count }.prefix(6)
+        guard !samples.isEmpty else { return nil }
+        var ratios: [Double] = []
+        for (w, l) in samples {
+            let size = fitSize(w.text, family: family, bold: false, italic: false, inkWidth: w.bounds.width)
+            guard size > 4 else { continue }
+            let rect = CGRect(x: w.bounds.minX, y: l.bounds.minY, width: w.bounds.width, height: l.bounds.height)
+            let orig = ink.crop(rect)
+            let rendered = TextMetrics.mask(w.text, font: palette.font(family, bold: false, italic: false, size: size),
+                                            width: orig.width, height: orig.height, baselineRow: Int(l.baseline - rect.minY))
+            let a = orig.bits.reduce(0) { $0 + Int($1) }, b = rendered.bits.reduce(0) { $0 + Int($1) }
+            if b > 0 { ratios.append(Double(a) / Double(b)) }
+        }
+        guard !ratios.isEmpty else { return nil }
+        let med = ratios.sorted()[ratios.count / 2]
+        // сканер «раздувает» и обычный текст: порог с запасом
+        return med > 1.45
+    }
+
+    /// Абзац почти целиком жирный или курсивный — значит целиком (эпиграф, подзаголовок):
+    /// по отдельным словам решение шумное, и в абзаце появляются случайные «полужирные» слова.
+    static func unifyEmphasis(_ lines: inout [TextLine]) {
+        let words = lines.flatMap(\.words).filter { $0.text.count >= 3 }
+        guard words.count >= 3 else { return }
+        let total = words.reduce(0) { $0 + $1.text.count }
+        let bold = words.filter(\.bold).reduce(0) { $0 + $1.text.count }
+        let italic = words.filter(\.italic).reduce(0) { $0 + $1.text.count }
+        for li in lines.indices {
+            for wi in lines[li].words.indices {
+                if bold * 10 >= total * 6 { lines[li].words[wi].bold = true }
+                if italic * 10 >= total * 6 { lines[li].words[wi].italic = true }
+            }
+        }
+    }
 }

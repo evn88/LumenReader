@@ -166,8 +166,14 @@ struct ReaderWindow: View {
 enum RenderCLI {
     static func run(input: String, output: String, themeName: String, scalePercent: Double = 100) -> Int32 {
         let url = URL(fileURLWithPath: input)
-        guard let loaded = PageSource.load(url), let image = loaded.pages.first?.render() else {
+        // SR_PAGE=N — страница книги (с 1), по умолчанию первая
+        let pageNo = max(1, Int(ProcessInfo.processInfo.environment["SR_PAGE"] ?? "") ?? 1)
+        guard let loaded = PageSource.load(url), loaded.pages.count >= pageNo, let image = loaded.pages[pageNo - 1].render() else {
             print("Не удалось открыть \(input)"); return 1
+        }
+        if let save = ProcessInfo.processInfo.environment["SR_SAVE_SCAN"],
+           let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: save) as CFURL, UTType.png.identifier as CFString, 1, nil) {
+            CGImageDestinationAddImage(dest, image, nil); CGImageDestinationFinalize(dest)
         }
         do {
             let start = Date()

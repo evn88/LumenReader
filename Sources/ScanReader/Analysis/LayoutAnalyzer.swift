@@ -104,7 +104,11 @@ struct LayoutAnalyzer {
     /// (отладка разбора структуры; блоки кода восстанавливаются приблизительно).
     static func ocrLines(from layout: PageLayout) -> [OCRLine] {
         func ocr(_ l: TextLine) -> OCRLine {
-            OCRLine(text: l.text, box: l.bounds, confidence: l.confidence, words: l.words.map { ($0.text, $0.bounds) })
+            // рамка по краске захватывает выносные элементы соседних строк — сужаем к строке, как у Vision
+            let tight = CGRect(x: l.bounds.minX, y: l.baseline - l.xHeight * 2.1, width: l.bounds.width, height: l.xHeight * 2.6)
+                .intersection(l.bounds)
+            return OCRLine(text: l.text, box: tight.isNull ? l.bounds : tight, confidence: l.confidence,
+                           words: l.words.map { ($0.text, $0.bounds) })
         }
         var out = layout.allLines.map(ocr) + layout.figureLabels.map { ocr($0.line) }
         for b in layout.codeBlocks {
@@ -166,6 +170,35 @@ struct LayoutAnalyzer {
             ink.clear(r.insetBy(dx: -1, dy: -1))
         }
 
+        // 2б. Краска, которую не распознали ни текстом, ни иллюстрацией, ни линейкой: формулы, схемки,
+        // значки. Без этого такие места на странице просто пропадали — показываем их фрагментом скана.
+        var leftovers: [CGRect] = []
+        let lineHeights = ocr.map(\.box.height).sorted()
+        let typical = lineHeights.isEmpty ? H * 0.015 : lineHeights[lineHeights.count / 2]
+        var rest = nonText
+        for r in rules { rest.clear(r.insetBy(dx: -3, dy: -3)) }
+        for r in figures { rest.clear(r) }
+        for c in rest.downsampled(f).dilated(radius: 3).components() {
+            let r = CGRect(x: c.rect.minX * CGFloat(f), y: c.rect.minY * CGFloat(f),
+                           width: c.rect.width * CGFloat(f), height: c.rect.height * CGFloat(f))
+                .insetBy(dx: CGFloat(3 * f) - 4, dy: CGFloat(3 * f) - 4)
+                .intersection(CGRect(x: 0, y: 0, width: W, height: H))
+            guard !r.isNull else { continue }
+            let edge = r.minX <= 4 || r.minY <= 4 || r.maxX >= W - 4 || r.maxY >= H - 4
+            // настоящая краска, а не пыль: несколько знаков шириной и заметная высота
+            guard !edge, r.width >= typical * 1.5, r.height >= typical * 0.6,
+                  let inkR = rest.inkBounds(in: r), inkR.width >= typical * 1.2 else { continue }
+            let dots = rest.crop(inkR).bits.reduce(0) { $0 + Int($1) }
+            guard Double(dots) >= 0.04 * Double(inkR.width * inkR.height) else { continue }
+            // хвосты букв над и под рамками строк OCR (рамка Vision чуть ниже строки) — не формула:
+            // такая «краска» лежит в основном внутри строк и низкая
+            let covered = ocr.reduce(CGFloat(0)) { acc, o in
+                let x = o.box.intersection(inkR); return acc + (x.isNull ? 0 : x.width * x.height) }
+            guard covered < 0.3 * inkR.width * inkR.height, inkR.height >= typical * 0.7 else { continue }
+            leftovers.append(inkR.insetBy(dx: -4, dy: -4))
+        }
+        leftovers = mergeOverlapping(leftovers.map { $0.insetBy(dx: -typical * 0.9, dy: -typical * 0.4) })
+
         // 3a. Надписи внутри иллюстраций — для перерисовки при улучшении картинок.
         var figureLabels: [FigureLabel] = []
         for o in ocr {
@@ -177,6 +210,23 @@ struct LayoutAnalyzer {
 
         // 3. Строки текста вне иллюстраций; типичные ошибки распознавания — исправляем.
         var lines = ocr.filter { !inFigure($0.box) }.compactMap { buildLine($0, ink: ink) }
+        // короткие строки внутри нераспознанной краски («min», «max» у формулы) — её часть
+        var leftoverLines: [[TextLine]] = Array(repeating: [], count: leftovers.count)
+        lines.removeAll { l in
+            let longWords = l.words.filter { $0.text.filter(\.isLetter).count >= 4 }.count
+            let c = CGPoint(x: l.bounds.midX, y: l.bounds.midY)
+            // строка внутри нераспознанной краски (обрывки формулы) или короткая и задевает её
+            guard let k = leftovers.firstIndex(where: { r in
+                if r.contains(c) && l.bounds.width <= r.width * 1.3 { return true }
+                if longWords <= 1 && r.intersects(l.bounds) { return true }
+                // продолжение формулы в той же строке: рядом по горизонтали, почти без слов прозы
+                let vOverlap = min(r.maxY, l.bounds.maxY) - max(r.minY, l.bounds.minY)
+                let hGap = max(l.bounds.minX - r.maxX, r.minX - l.bounds.maxX)
+                return vOverlap >= 0.5 * l.bounds.height && hGap <= typical * 2 && longWords <= 3
+                    && l.words.count <= 8
+            }) else { return false }
+            leftovers[k] = leftovers[k].union(l.bounds.insetBy(dx: -4, dy: -4)); leftoverLines[k].append(l); return true
+        }
         OCRCorrector.correct(&lines, languages: languages)
         for i in figureLabels.indices {
             var l = [figureLabels[i].line]
@@ -242,9 +292,66 @@ struct LayoutAnalyzer {
             }
         }
         var styled: [Paragraph] = []
+        // формулы и «мусор» распознавания (цифры и подписи внутри графиков) — фрагментом скана
+        var scans = structure.scans + zip(leftovers, leftoverLines).map { ScanRegion(rect: $0.0, lines: $0.1) }
+        let complex = ComplexBlocks.split(&lines)
+        for l in complex {
+            let r = l.bounds.insetBy(dx: -6, dy: -6).intersection(CGRect(x: 0, y: 0, width: W, height: H))
+            if let k = scans.firstIndex(where: { $0.rect.insetBy(dx: -l.xHeight * 2.5, dy: -l.xHeight * 2.5).intersects(r) }) {
+                scans[k].rect = scans[k].rect.union(r); scans[k].lines.append(l)
+            } else {
+                scans.append(ScanRegion(rect: r, lines: [l]))
+            }
+        }
+        // пересекающиеся фрагменты — одним
+        var merged: [ScanRegion] = []
+        for r in scans {
+            if let k = merged.firstIndex(where: { $0.rect.intersects(r.rect) }) {
+                merged[k].rect = merged[k].rect.union(r.rect); merged[k].lines += r.lines
+            } else { merged.append(r) }
+        }
+        scans = merged
+        // строки, оказавшиеся внутри фрагмента скана, — его часть (иначе текст рисуется поверх картинки)
+        lines.removeAll { l in
+            let c = CGPoint(x: l.bounds.midX, y: l.bounds.midY)
+            guard let k = scans.firstIndex(where: { $0.rect.contains(c) }) else { return false }
+            scans[k].lines.append(l); return true
+        }
         for var group in groupParagraphs(lines) {
             let (family, size) = matcher.style(&group)
             styled.append(Paragraph(family: family, fontSize: size, lines: group))
+        }
+        Headings.refine(&styled, pageWidth: W)
+        let bodySize = Headings.bodySize(styled)
+        // гарнитура основного текста — по числу строк
+        let bodyFamily = Dictionary(grouping: styled, by: \.family).max { a, b in
+            a.value.reduce(0) { $0 + $1.lines.count } < b.value.reduce(0) { $0 + $1.lines.count } }?.key
+        for i in styled.indices {
+            StyleMatcher.unifyEmphasis(&styled[i].lines)
+            // заголовок, эпиграф, подпись (кегль заметно отличается от основного): жирность — по плотности краски, целиком
+            // подзаголовок того же кегля, но другой гарнитурой (рубленый среди антиквы) — тоже
+            let otherFamily = styled[i].family != bodyFamily && styled[i].family != .mono && styled[i].lines.count <= 2
+            let distinct = (bodySize > 0 && abs(styled[i].fontSize - bodySize) > bodySize * 0.15 && styled[i].lines.count <= 4)
+                || otherFamily
+            let heading = Headings.isHeading(styled[i], body: bodySize)
+            if heading || distinct, let bold = matcher.headingIsBold(styled[i].lines, family: styled[i].family),
+               bold || heading {
+                // у подписи «Рис. 2.1.» жирное только начало: «не жирный» решаем по плотности лишь для заголовков
+                for li in styled[i].lines.indices { for wi in styled[i].lines[li].words.indices { styled[i].lines[li].words[wi].bold = bold } }
+            } else if distinct, matcher.headingIsBold(styled[i].lines, family: styled[i].family) == false {
+                // эпиграф, подпись: по плотности не жирные — случайные «жирные» слова убираем,
+                // кроме начала подписи с номером («Рис. 2.1.»)
+                let words = styled[i].lines.flatMap(\.words)
+                let lead = words.prefix { $0.bold }.prefix(3)
+                let keep = lead.count <= 2 && lead.contains { $0.text.contains(where: \.isNumber) } ? lead.count : 0
+                var k = 0
+                for li in styled[i].lines.indices {
+                    for wi in styled[i].lines[li].words.indices {
+                        if k >= keep { styled[i].lines[li].words[wi].bold = false }
+                        k += 1
+                    }
+                }
+            }
         }
 
         // Код: абзацы-код + соседние с ними короткие куски (пустые строки в коде рвут абзац),
@@ -286,7 +393,7 @@ struct LayoutAnalyzer {
         flush()
         return PageLayout(size: CGSize(width: W, height: H), figures: figures, rules: rules, paragraphs: paragraphs,
                           codeBlocks: codeBlocks, figureLabels: figureLabels, tocBlocks: toc, tables: tables,
-                          scanRegions: structure.scans, columnZones: structure.zones)
+                          scanRegions: scans, columnZones: structure.zones)
     }
 
     // MARK: - код
@@ -404,7 +511,7 @@ struct LayoutAnalyzer {
 
     private func buildLine(_ o: OCRLine, ink: InkMask) -> TextLine? {
         let band = o.box.insetBy(dx: -4, dy: -o.box.height * 0.08)
-        guard let inkBox = ink.inkBounds(in: band) else { return nil }
+        guard var inkBox = ink.inkBounds(in: band) else { return nil }
         let prof = ink.rowProfile(inkBox)
         // ряды подчёркивания (сплошная краска почти на всю ширину) не участвуют в поиске x-height
         var ruleRows = Set(prof.indices.filter { Double(prof[$0]) > 0.8 * Double(inkBox.width) })
@@ -414,10 +521,34 @@ struct LayoutAnalyzer {
             }
         }
         guard let mx = prof.indices.filter({ !ruleRows.contains($0) }).map({ prof[$0] }).max(), mx > 0 else { return nil }
-        let core = prof.indices.filter { !ruleRows.contains($0) && Double(prof[$0]) > 0.35 * Double(mx) }
-        guard let first = core.first, let last = core.last else { return nil }
+        // пояс строчных букв — самая «плотная» сплошная полоса рядов; рамка Vision бывает выше строки
+        // и захватывает соседнюю: тогда first…last по всем рядам растягивался на две строки, базовая линия
+        // уезжала вниз и строки на странице наезжали друг на друга
+        var runs: [(Int, Int, Int)] = []          // начало, конец, сумма краски
+        var r0: Int? = nil, sum = 0
+        for i in prof.indices {
+            let on = !ruleRows.contains(i) && Double(prof[i]) > 0.35 * Double(mx)
+            if on { if r0 == nil { r0 = i; sum = 0 }; sum += prof[i] }
+            if let a = r0, !on || i == prof.count - 1 {
+                // разрыв в 1–2 ряда (тонкие штрихи) не рвёт пояс
+                let end = on ? i : i - 1
+                if let lastRun = runs.last, a - lastRun.1 <= 3 { runs[runs.count - 1] = (lastRun.0, end, lastRun.2 + sum) }
+                else { runs.append((a, end, sum)) }
+                r0 = nil
+            }
+        }
+        guard let belt = runs.max(by: { $0.2 < $1.2 }) else { return nil }
+        let first = belt.0, last = belt.1
         let baseline = inkBox.minY + CGFloat(last + 1)
         let xHeight = CGFloat(last - first + 1)
+        // краска чужой строки по краям рамки не входит в рамку этой
+        if runs.count > 1, ruleRows.isEmpty {
+            let top = inkBox.minY + max(0, CGFloat(first) - xHeight * 1.6)
+            let bottom = min(inkBox.maxY, baseline + xHeight * 0.9)
+            if let tight = ink.inkBounds(in: CGRect(x: inkBox.minX, y: top, width: inkBox.width, height: bottom - top)) {
+                inkBox = tight
+            }
+        }
 
         // слова: сегменты краски между пробелами; если число не совпало — рамки Vision
         // подчёркивание сливает слова — столбцы считаем только по рядам над ним

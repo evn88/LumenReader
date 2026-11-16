@@ -208,4 +208,36 @@ final class StructureTests: XCTestCase {
         let boxes = Set(pages.flatMap(\.wordBoxes).map(\.gid))
         XCTAssertEqual(boxes.count, l.allLines.flatMap(\.words).count)
     }
+
+    // MARK: заголовки и сложные блоки
+
+    func testHeadingAlignmentFromItsOwnLines() {
+        // заголовок по правому краю: первая строка во всю ширину раньше становилась «по ширине»
+        let h = Paragraph(family: .sans, fontSize: 80, lines: [line(250, 300, ["Почему", "так", "важно", "изучать", "математику"]),
+                                                                line(650, 400, ["искусственного", "интеллекта?"])])
+        var hh = h
+        // правый край обеих строк одинаковый
+        let r0 = hh.lines[0].bounds.maxX, r1 = hh.lines[1].bounds.maxX
+        hh.lines[1].bounds.origin.x += r0 - r1
+        let body = (0..<6).map { k in line(130, 600 + CGFloat(k) * 40, ["обычная", "строка", "основного", "текста", "страницы"]) }
+        var ps = [hh, Paragraph(family: .serif, fontSize: 30, lines: body)]
+        Headings.refine(&ps, pageWidth: 1200)
+        XCTAssertTrue(ps[0].lines.allSatisfy { $0.alignment == .right })
+    }
+
+    func testFormulasAndGarbageGoToScan() {
+        XCTAssertTrue(ComplexBlocks.isGarbage(line(100, 100, ["5555555555555555"])))
+        XCTAssertTrue(ComplexBlocks.isGarbage(line(100, 100, ["44884849444"])))
+        XCTAssertFalse(ComplexBlocks.isGarbage(line(100, 100, ["Рис.", "3.16"])))
+        XCTAssertTrue(ComplexBlocks.isFormula(line(100, 100, ["∑", "a", "=", "1"])))
+        XCTAssertFalse(ComplexBlocks.isFormula(line(100, 100, ["если", "x", "=", "0,", "то", "функция", "дифференцируема"])))
+        // выключная формула по центру колонки уходит в скан, проза и код — нет
+        var lines = (0..<5).map { k in line(130, 100 + CGFloat(k) * 40, ["обычная", "строка", "основного", "текста", "страницы", "здесь"]) }
+        lines.append(line(500, 330, ["f(x)", "=", "sign", "(w", "x)"]))
+        lines.append(line(130, 380, ["let", "x", "=", "a", "+", "b;"]))
+        let out = ComplexBlocks.split(&lines)
+        XCTAssertEqual(out.map(\.text), ["f(x) = sign (w x)"])
+        XCTAssertEqual(lines.count, 6)
+    }
 }
+

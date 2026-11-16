@@ -23,6 +23,13 @@ enum PageSource {
     }
 
     /// Растр страницы для OCR. 300 dpi хватает Vision с запасом.
+    private static var documents: [URL: PDFDocument] = [:]
+    private static let documentsLock = NSLock()
+    /// Последний открытый документ каждой книги живёт, пока живёт приложение (страницы ссылаются на него слабо).
+    private static func retain(_ doc: PDFDocument, for url: URL) {
+        documentsLock.lock(); documents[url.standardizedFileURL] = doc; documentsLock.unlock()
+    }
+
     func render(dpi: CGFloat = 300) -> CGImage? {
         switch self {
         case .image(let url):
@@ -64,6 +71,9 @@ enum PageSource {
             // битый PDF раньше открывался «картинкой» и давал вечную ошибку; зашифрованный — пустые страницы
             guard let doc = PDFDocument(url: url), doc.pageCount > 0 else { return nil }
             if doc.isLocked && !doc.unlock(withPassword: "") { return nil }
+            // PDFPage держит документ слабой ссылкой: без живого PDFDocument страница рисуется неверно
+            // («Drawing a PDFPage when its PDFDocument is nil is unsupported» — сдвиг, пропавшие слои)
+            retain(doc, for: url)
             return (title, (0..<doc.pageCount).compactMap { doc.page(at: $0) }.map { .pdf($0, label: $0.label) })
         }
         return (title, [.image(url)])
