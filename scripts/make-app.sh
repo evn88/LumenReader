@@ -50,7 +50,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
-  <key>CFBundleVersion</key><string>${BUILD_NUMBER:-$VERSION}</string>
+  <key>CFBundleVersion</key><string>${BUILD_NUMBER:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}</string>
   <key>CFBundleDevelopmentRegion</key><string>ru</string>
   <key>CFBundleLocalizations</key><array><string>ru</string></array>
   <key>LSMinimumSystemVersion</key><string>14.0</string>

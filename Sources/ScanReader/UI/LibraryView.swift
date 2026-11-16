@@ -204,14 +204,8 @@ struct LibraryView: View {
                     if (filter ?? .all) == .all, query.isEmpty, !continueReading.isEmpty {
                         VStack(alignment: .leading, spacing: 16) {
                             SectionHeader(title: "Продолжить чтение", subtitle: nil)
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(alignment: .top, spacing: 24) {
-                                    ForEach(continueReading) { book in
-                                        ContinueCard(book: book) { open(book) }.contextMenu { menu(book) }
-                                    }
-                                }
-                                .padding(.vertical, 16).padding(.horizontal, 4)
-                            }
+                            ContinueShelf(books: continueReading, open: open, menu: { AnyView(menu($0)) })
+                                .padding(.horizontal, -32)        // лента — до краёв окна
                         }
                     }
                     VStack(alignment: .leading, spacing: 16) {
@@ -408,7 +402,8 @@ struct ContinueCard: View {
             HStack(alignment: .bottom, spacing: 16) {
                 CoverView(book: book, glow: true).frame(width: 112, height: 160, alignment: .bottom)
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(book.title).font(.system(.title3, design: .serif).weight(.semibold)).lineLimit(2)
+                    Text(BookMetadata.unbreakableWords(book.title)).font(.system(.title3, design: .serif).weight(.semibold))
+                        .lineLimit(2).truncationMode(.tail)
                     if let a = book.author { Text(a).font(.callout).foregroundStyle(.secondary).lineLimit(1) }
                     Spacer(minLength: 0)
                     ProgressView(value: book.progress ?? 0).tint(Brand.amber).frame(width: 136)
@@ -476,12 +471,15 @@ struct OverlayScrollers: NSViewRepresentable {
             apply()
             token.map(NotificationCenter.default.removeObserver)
             token = NotificationCenter.default.addObserver(forName: NSScroller.preferredScrollerStyleDidChangeNotification,
-                                                           object: nil, queue: .main) { [weak self] _ in self?.apply() }
+                                                           object: nil, queue: .main) { [weak self] _ in
+                // AppKit переключает стиль сам после уведомления — применяем следом
+                DispatchQueue.main.async { self?.apply() }
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.apply() }
         }
         func apply() {
             guard let root = window?.contentView else { return }
-            let always = UserDefaults.standard.string(forKey: "AppleShowScrollBars") == "Always"
+            let always = UserDefaults(suiteName: UserDefaults.globalDomain)?.string(forKey: "AppleShowScrollBars") == "Always"
             func walk(_ v: NSView) {
                 if let sv = v as? NSScrollView {
                     if always {
@@ -786,4 +784,66 @@ struct CollectionDrop: DropDelegate {
     func dropUpdated(info: DropInfo) -> DropProposal? { inner.dropUpdated(info: info) }
     func dropExited(info: DropInfo) { target = nil; inner.dropExited(info: info) }
     func performDrop(info: DropInfo) -> Bool { target = nil; return inner.performDrop(info: info) }
+}
+
+/// Лента «Продолжить чтение»: прокрутка до краёв окна, мягкий fade по краям, стрелки при наведении,
+/// привязка к карточкам; свечение обложек не обрезается.
+struct ContinueShelf: View {
+    let books: [LibraryBook]
+    var open: (LibraryBook) -> Void
+    var menu: (LibraryBook) -> AnyView
+    @State private var hover = false
+    @State private var index = 0          // карточка у левого края (для стрелок)
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: 24) {
+                    ForEach(books) { book in
+                        ContinueCard(book: book) { open(book) }.contextMenu { menu(book) }.id(book.id)
+                    }
+                }
+                .scrollTargetLayout()
+                .padding(.vertical, 28)                  // место для свечения сверху и снизу
+            }
+            .contentMargins(.horizontal, 32, for: .scrollContent)
+            .scrollTargetBehavior(.viewAligned)
+            .scrollClipDisabled()                        // свечение затухает само, без прямых краёв
+            .mask {
+                HStack(spacing: 0) {
+                    LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: .trailing).frame(width: 24)
+                    Color.black
+                    LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing).frame(width: 48)
+                }
+                .padding(.vertical, -40)
+            }
+            .overlay {
+                if hover, books.count > 1 {
+                    HStack {
+                        arrow("chevron.left", label: "Назад") { go(-1, proxy) }.disabled(index == 0)
+                        Spacer()
+                        arrow("chevron.right", label: "Вперёд") { go(1, proxy) }.disabled(index >= books.count - 1)
+                    }
+                    .padding(.horizontal, 12)
+                    .transition(.opacity)
+                }
+            }
+        }
+        .onHover { h in withAnimation(.easeOut(duration: 0.15)) { hover = h } }
+    }
+
+    private func go(_ d: Int, _ proxy: ScrollViewProxy) {
+        index = min(max(0, index + d), books.count - 1)
+        withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(books[index].id, anchor: .leading) }
+    }
+
+    private func arrow(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: 14, weight: .semibold))
+                .frame(width: 32, height: 32)
+                .background(.regularMaterial, in: Circle())
+                .shadow(color: .black.opacity(0.2), radius: 4, y: 1)
+        }
+        .buttonStyle(.plain).accessibilityLabel(label)
+    }
 }

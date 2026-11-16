@@ -29,3 +29,20 @@ final class BookMetadataTests: XCTestCase {
         XCTAssertEqual(n.title, "draft"); XCTAssertNil(n.author)
     }
 }
+
+final class DisplayNameTests: XCTestCase {
+    func testUnderscoresAndAppleBooksTitles() {
+        let a = BookMetadata.resolve(title: "Базовая_математика_для_искусственного_интеллекта_2024", author: "UnknownAuthor",
+                                     fileName: "Базовая_математика_для_искусственного_интеллекта_2024")
+        XCTAssertEqual(a.title, "Базовая математика для искусственного интеллекта 2024"); XCTAssertNil(a.author)
+        let g = BookMetadata.resolve(title: "Гриффитс Д., Гриффитс Д. - React. Сборник рецептов - 2023", author: "UnknownAuthor",
+                                     fileName: "Гриффитс Д., Гриффитс Д. - React. Сборник рецептов - 2023")
+        XCTAssertEqual(g.title, "React. Сборник рецептов"); XCTAssertEqual(g.author, "Гриффитс Д., Гриффитс Д.")
+    }
+
+    func testNoBreaksInsideWords() {
+        let s = BookMetadata.unbreakableWords("Базовая математика")
+        XCTAssertEqual(s.replacingOccurrences(of: "\u{2060}", with: ""), "Базовая математика")
+        XCTAssertEqual(s.split(separator: " ").count, 2, "переносы только по пробелам")
+    }
+}

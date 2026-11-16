@@ -40,9 +40,30 @@ enum BookMetadata {
         var t = title?.trimmingCharacters(in: .whitespacesAndNewlines)
         if t?.isEmpty ?? true { t = nil }
         let a = Self.author(author)
-        if a == nil, let parsed = fromFileName(fileName), t == nil || t == fileName {
+        // название, совпадающее с именем файла (так его заводит Apple Books), — тоже «из имени файла»
+        let fromFile = t == nil || t == fileName || t.map(cleanFileName) == cleanFileName(fileName)
+        if a == nil, fromFile, let parsed = fromFileName(cleanFileName(fileName)) {
             return (parsed.title, parsed.author)
         }
-        return (t ?? fileName, a)
+        return (fromFile ? cleanFileName(fileName) : t!, a)
+    }
+
+    /// Имя файла как название: «_» → пробелы, лишние пробелы схлопнуты.
+    static func cleanFileName(_ s: String) -> String {
+        s.replacingOccurrences(of: "_", with: " ")
+            .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
+    /// Название и автор книги по файлу — одна функция для библиотеки, окна книги, поиска и «Заметок».
+    static func display(for url: URL, title: String? = nil, author: String? = nil) -> (title: String, author: String?) {
+        let m = Sidecar.meta(url)
+        return resolve(title: title ?? m.title, author: author ?? m.author, fileName: url.deletingPathExtension().lastPathComponent)
+    }
+
+    /// Текст для заголовков карточек: переносы только по словам (без «математи-ка»): внутри слов — word joiner.
+    static func unbreakableWords(_ s: String) -> String {
+        s.split(separator: " ", omittingEmptySubsequences: false)
+            .map { $0.map(String.init).joined(separator: "\u{2060}") }
+            .joined(separator: " ")
     }
 }

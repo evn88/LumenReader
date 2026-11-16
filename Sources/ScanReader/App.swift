@@ -48,6 +48,9 @@ struct ScanReaderApp: App {
         // каждая книга — в своём окне, без системных вкладок (как в Apple Books)
         NSWindow.allowsAutomaticWindowTabbing = false
         Product.migrate()
+        // по HIG — тонкие оверлейные полосы, появляются при прокрутке (и с мышью). Только если пользователь
+        // не выбрал в Системных настройках «всегда»: registration domain уступает явной глобальной настройке.
+        UserDefaults.standard.register(defaults: ["AppleShowScrollBars": "WhenScrolling"])
         DispatchQueue.main.async { ApplicationUpdater.shared.start() }
         // миграция: масштаб, заданный до появления автоподбора, считаем ручным
         let d = UserDefaults.standard
@@ -92,7 +95,7 @@ struct ReaderWindow: View {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .navigationTitle(URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent)
+        .navigationTitle(BookMetadata.display(for: URL(fileURLWithPath: path)).title)
         // окно закрыто — распознавание этой книги (упреждение, фон, идущие запросы Vision) прекращается
         .onDisappear { book?.close() }
         .task(id: path) {
