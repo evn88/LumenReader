@@ -1,7 +1,10 @@
 import AppKit
 import Foundation
 import PDFKit
+import OSLog
 import UniformTypeIdentifiers
+
+let libraryLog = Logger(subsystem: Bundle.main.bundleIdentifier ?? "io.github.evn88.lumenreader", category: "library")
 
 /// Позиция чтения: страница скана/PDF или глава EPUB + доля внутри неё.
 struct ReadingPosition: Codable, Equatable {
@@ -25,6 +28,8 @@ struct BookMeta: Codable, Equatable {
     var pagesForceText: [Int]?
     /// Страницы, на которых читатель выключил улучшение скана (по умолчанию оно включено).
     var pagesNoScanEnhance: [Int]?
+    /// Фоновое распознавание книги остановлено читателем.
+    var recognitionPaused: Bool?
     var importedFrom: String?
     var importedAt: Date?
     /// Перевод: язык, показ перевода, фоновый перевод всей книги.
@@ -56,11 +61,11 @@ enum Sidecar {
     }
 }
 
-enum BookKind: String, Hashable {
+enum BookKind: String, Hashable, Codable {
     case pdf, epub, scans, image
 }
 
-struct LibraryBook: Identifiable, Hashable {
+struct LibraryBook: Identifiable, Hashable, Codable {
     var id: String { url.lastPathComponent }
     var url: URL
     var kind: BookKind
@@ -77,6 +82,39 @@ struct LibraryBook: Identifiable, Hashable {
     var finished: Bool { (progress ?? 0) >= 0.98 }
 }
 
+/// Отметки изменений книги: пока они те же, книгу при обновлении полки не перечитываем
+/// (без открытия PDF/EPUB и координированного чтения meta.json — их сотни).
+struct LibraryStamp: Codable, Equatable {
+    var file: Date?
+    var sidecar: Date?
+    var meta: Date?
+}
+
+struct LibraryEntry: Codable {
+    var book: LibraryBook
+    var stamp: LibraryStamp
+}
+
+/// Снимок полки на диске этого Mac: при запуске книги видны сразу, пока папка перечитывается.
+enum LibrarySnapshot {
+    static func file(for folder: URL) -> URL {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let key = folder.standardizedFileURL.path.utf8.reduce(UInt64(14_695_981_039_346_656_037)) { ($0 ^ UInt64($1)) &* 1_099_511_628_211 }
+        return base.appendingPathComponent("\(Product.dataFolder)/library-\(String(key, radix: 16)).json")
+    }
+
+    static func load(_ folder: URL) -> [LibraryEntry] {
+        guard let data = try? Data(contentsOf: file(for: folder)) else { return [] }
+        return (try? Sidecar.decoder.decode([LibraryEntry].self, from: data)) ?? []
+    }
+
+    static func save(_ entries: [LibraryEntry], for folder: URL) {
+        let url = file(for: folder)
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let data = try? Sidecar.encoder.encode(entries) { try? data.write(to: url, options: .atomic) }
+    }
+}
+
 /// Папка библиотеки (лучше общая папка iCloud Drive): книги, их обложки и метаданные.
 @MainActor
 final class LibraryStore: ObservableObject {
@@ -87,6 +125,12 @@ final class LibraryStore: ObservableObject {
     @Published private(set) var collections: [String] = []
     @Published private(set) var covers: [String: NSImage] = [:]
     @Published private(set) var scanning = false
+    /// Папка хоть раз прочитана с открытия (до этого пустая полка — ещё не «пустая библиотека»).
+    @Published private(set) var loaded = false
+    /// Прочитанные книги с отметками изменений: следующее обновление перечитывает только изменённые.
+    private var entries: [String: LibraryEntry] = [:]
+    private var refreshing = false
+    private var refreshAgain = false
 
     private static let bookmarkKey = "libraryBookmark"
     private var watcher: DispatchSourceFileSystemObject?
@@ -119,6 +163,12 @@ final class LibraryStore: ObservableObject {
         }
         folder = url
         covers = [:]; coverJobs = []
+        // снимок полки с прошлого запуска — мгновенно; папка перечитывается следом
+        let snapshot = LibrarySnapshot.load(url)
+        entries = Dictionary(snapshot.map { ($0.book.id, $0) }, uniquingKeysWith: { a, _ in a })
+        books = snapshot.map(\.book)
+        collections = Self.collectionNames(books, extra: [])
+        loaded = !snapshot.isEmpty
         refresh()
         watch()
     }
@@ -129,19 +179,35 @@ final class LibraryStore: ObservableObject {
 
     func refresh() {
         guard let folder else { return }
+        // обновления не накладываются: пока идёт одно, следующее только запоминается
+        guard !refreshing else { refreshAgain = true; return }
+        refreshing = true
         scanning = true
-        Task.detached(priority: .utility) {
-            let found = Self.scan(folder)
-            var extra: [String] = []
-            if let data = SyncedFile.read(folder.appendingPathComponent(".scanreader/library.json")),
-               let list = try? JSONDecoder().decode([String].self, from: data) { extra = list }
+        let previous = entries
+        Task.detached(priority: books.isEmpty ? .userInitiated : .utility) {
+            let t0 = Date()
+            let found = Self.scan(folder, previous: previous)
+            let extra: [String] = SyncedFile.read(folder.appendingPathComponent(".scanreader/library.json"))
+                .flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
+            LibrarySnapshot.save(found, for: folder)
+            libraryLog.info("полка: \(found.count) книг за \(String(format: "%.2f", Date().timeIntervalSince(t0)), privacy: .public) с")
             await MainActor.run {
+                self.refreshing = false
                 guard folder == self.folder else { return }
-                self.books = found
-                self.collections = Array(Set(found.flatMap(\.collections) + extra)).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+                self.entries = Dictionary(found.map { ($0.book.id, $0) }, uniquingKeysWith: { a, _ in a })
+                let list = found.map(\.book)
+                if list != self.books { self.books = list }
+                let names = Self.collectionNames(list, extra: extra)
+                if names != self.collections { self.collections = names }
                 self.scanning = false
+                self.loaded = true
+                if self.refreshAgain { self.refreshAgain = false; self.refresh() }
             }
         }
+    }
+
+    nonisolated static func collectionNames(_ books: [LibraryBook], extra: [String]) -> [String] {
+        Array(Set(books.flatMap(\.collections) + extra)).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
     nonisolated static func kind(of url: URL) -> BookKind? {
@@ -157,34 +223,61 @@ final class LibraryStore: ObservableObject {
         return UTType(filenameExtension: ext)?.conforms(to: .image) == true ? .image : nil
     }
 
-    nonisolated static func scan(_ folder: URL) -> [LibraryBook] {
+    nonisolated static func scan(_ folder: URL) -> [LibraryBook] { scan(folder, previous: [:]).map(\.book) }
+
+    /// Отметки изменений книги: сам файл, папка sidecar (появились раскладки) и meta.json.
+    nonisolated static func stamp(_ url: URL) -> LibraryStamp {
         let fm = FileManager.default
-        let items = (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.creationDateKey],
+        func date(_ u: URL) -> Date? { (try? fm.attributesOfItem(atPath: u.path))?[.modificationDate] as? Date }
+        let side = Sidecar.dir(for: url)
+        return LibraryStamp(file: date(url), sidecar: date(side), meta: date(side.appendingPathComponent("meta.json")))
+    }
+
+    /// Книги папки. Неизменившиеся (те же отметки) берутся из previous, остальные читаются параллельно.
+    nonisolated static func scan(_ folder: URL, previous: [String: LibraryEntry]) -> [LibraryEntry] {
+        let fm = FileManager.default
+        let items = (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.creationDateKey, .contentModificationDateKey],
                                                  options: [.skipsHiddenFiles])) ?? []
-        return items.compactMap { url -> LibraryBook? in
-            guard let kind = kind(of: url) else { return nil }
-            let meta = Sidecar.meta(url)
-            var title = meta.title, author = meta.author
-            if title == nil {
-                switch kind {
-                case .epub:
-                    if let e = try? EPUBBook(url) { title = e.title; author = author ?? e.author }
-                case .pdf:
-                    if let d = PDFDocument(url: url) {
-                        title = d.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String
-                        author = author ?? d.documentAttributes?[PDFDocumentAttribute.authorAttribute] as? String
-                    }
-                default: break
-                }
-                if title?.isEmpty ?? true { title = url.deletingPathExtension().lastPathComponent }
+        var results = [LibraryEntry?](repeating: nil, count: items.count)
+        let lock = NSLock()
+        DispatchQueue.concurrentPerform(iterations: items.count) { idx in
+            let url = items[idx]
+            let st = stamp(url)
+            let entry: LibraryEntry?
+            if let old = previous[url.lastPathComponent], old.stamp == st, old.book.url == url {
+                entry = old
+            } else {
+                entry = readBook(url).map { LibraryEntry(book: $0, stamp: st) }
             }
-            let side = Sidecar.dir(for: url)
-            let recognized = ((try? fm.contentsOfDirectory(atPath: side.path)) ?? []).contains { $0.hasPrefix("layouts-") }
-            let added = (try? url.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? .distantPast
-            let resolved = BookMetadata.resolve(title: title, author: author, fileName: url.deletingPathExtension().lastPathComponent)
-            return LibraryBook(url: url, kind: kind, title: resolved.title, author: resolved.author, collections: meta.collections ?? [],
-                               progress: meta.progress, lastOpened: meta.lastOpened, added: added, recognized: recognized)
+            lock.lock(); results[idx] = entry; lock.unlock()
         }
+        return results.compactMap { $0 }
+    }
+
+    nonisolated static func readBook(_ url: URL) -> LibraryBook? {
+        let fm = FileManager.default
+        guard let kind = kind(of: url) else { return nil }
+        let meta = Sidecar.meta(url)
+        var title = meta.title, author = meta.author
+        if title == nil {
+            switch kind {
+            case .epub:
+                if let e = try? EPUBBook(url) { title = e.title; author = author ?? e.author }
+            case .pdf:
+                if let d = PDFDocument(url: url) {
+                    title = d.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String
+                    author = author ?? d.documentAttributes?[PDFDocumentAttribute.authorAttribute] as? String
+                }
+            default: break
+            }
+            if title?.isEmpty ?? true { title = url.deletingPathExtension().lastPathComponent }
+        }
+        let side = Sidecar.dir(for: url)
+        let recognized = ((try? fm.contentsOfDirectory(atPath: side.path)) ?? []).contains { $0.hasPrefix("layouts-") }
+        let added = (try? url.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? .distantPast
+        let resolved = BookMetadata.resolve(title: title, author: author, fileName: url.deletingPathExtension().lastPathComponent)
+        return LibraryBook(url: url, kind: kind, title: resolved.title, author: resolved.author, collections: meta.collections ?? [],
+                           progress: meta.progress, lastOpened: meta.lastOpened, added: added, recognized: recognized)
     }
 
     /// Слежение за папкой: книги, добавленные на другом устройстве (iCloud), появляются сами.

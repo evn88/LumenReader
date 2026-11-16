@@ -163,6 +163,8 @@ final class ChromeVisibility: ObservableObject {
 
     func scheduleHide(after s: Double = ChromeVisibility.idleDelay) {
         hideTask?.cancel()
+        // снимки экрана для проверки интерфейса: SR_CHROME_PIN=1 — панель не гаснет
+        if ProcessInfo.processInfo.environment["SR_CHROME_PIN"] == "1" { return }
         hideTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(s))
             guard let self, !Task.isCancelled, !self.pinned else { return }
